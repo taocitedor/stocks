@@ -42,15 +42,20 @@ def get_batch_data():
     results = {}
 
     try:
-        # threads=False pour éviter le crash mémoire (SIGKILL) sur Render
+        # On télécharge 2 jours
         data = yf.download(ticker_list, period="2d", group_by='ticker', threads=False, prepost=False)
         
         for ticker in ticker_list:
             try:
-                df = data if len(ticker_list) == 1 else data[ticker]
+                # FIX ICI : Si un seul ticker, yfinance ne crée pas de sous-niveau
+                if len(ticker_list) == 1:
+                    df = data
+                else:
+                    df = data[ticker]
+                
                 df = df.dropna()
                 
-                if len(df) >= 1:
+                if not df.empty:
                     last_row = df.iloc[-1]
                     change_pct = 0
                     if len(df) >= 2:
@@ -68,8 +73,8 @@ def get_batch_data():
                     }
                 else:
                     results[ticker] = {"status": "no_data"}
-            except:
-                results[ticker] = {"status": "error"}
+            except Exception as e:
+                results[ticker] = {"status": "error", "message": str(e)}
 
         return jsonify(results)
     except Exception as e:
