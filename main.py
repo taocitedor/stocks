@@ -42,43 +42,78 @@ def get_batch_data():
     results = {}
 
     try:
-        # threads=False pour éviter le crash mémoire (SIGKILL) sur Render
-        data = yf.download(ticker_list, period="2d", group_by='ticker', threads=False, prepost=False)
-        
-        for ticker in ticker_list:
+        # ---------------------------------------------------------
+        # MODE SOLO (1 ticker) : On utilise yf.Ticker (100% fiable)
+        # ---------------------------------------------------------
+        if len(ticker_list) == 1:
+            ticker = ticker_list[0]
             try:
-                # Gestion de la structure yfinance (Solo vs Multi-tickers)
-                if len(ticker_list) == 1:
-                    df = data
+                stock = yf.Ticker(ticker)
+                df = stock.history(period="2d")
+                
+                if df.empty or 'Close' not in df.columns:
+                    results[ticker] = {"status": "no_data", "message": "Aucune donnée renvoyée"}
                 else:
-                    df = data[ticker]
-                
-                df = df.dropna(subset=['Close'])
-                
-                if not df.empty:
-                    last_row = df.iloc[-1]
-                    close_val = float(last_row['Close'])
-                    
-                    # Calcul de la variation par rapport à la veille
-                    change_pct = 0
-                    if len(df) >= 2:
-                        prev_close = float(df.iloc[-2]['Close'])
-                        change_pct = ((close_val - prev_close) / prev_close) * 100
+                    df = df.dropna(subset=['Close'])
+                    if not df.empty:
+                        last_row = df.iloc[-1]
+                        close_val = float(last_row['Close'])
+                        
+                        change_pct = 0
+                        if len(df) >= 2:
+                            prev_close = float(df.iloc[-2]['Close'])
+                            change_pct = ((close_val - prev_close) / prev_close) * 100
 
-                    results[ticker] = {
-                        "date": last_row.name.strftime('%Y-%m-%d'),
-                        "close": round(close_val, 3),
-                        "variation_veille": round(change_pct, 2),
-                        "high": round(float(last_row['High']), 3),
-                        "low": round(float(last_row['Low']), 3),
-                        "volume": int(last_row['Volume']),
-                        "status": "success"
-                    }
-                else:
-                    results[ticker] = {"status": "no_data"}
+                        results[ticker] = {
+                            "date": last_row.name.strftime('%Y-%m-%d'),
+                            "close": round(close_val, 3),
+                            "variation_veille": round(change_pct, 2),
+                            "high": round(float(last_row['High']), 3),
+                            "low": round(float(last_row['Low']), 3),
+                            "volume": int(last_row['Volume']),
+                            "status": "success"
+                        }
+                    else:
+                        results[ticker] = {"status": "no_data"}
             except Exception as e:
-                # Capture l'erreur spécifique pour ce ticker sans faire planter le batch
                 results[ticker] = {"status": "error", "message": str(e)}
+
+        # ---------------------------------------------------------
+        # MODE MULTI (>1 ticker) : On utilise yf.download
+        # ---------------------------------------------------------
+        else:
+            data = yf.download(ticker_list, period="2d", group_by='ticker', threads=False, prepost=False)
+            for ticker in ticker_list:
+                try:
+                    df = data[ticker]
+                    
+                    if df.empty or 'Close' not in df.columns:
+                        results[ticker] = {"status": "no_data", "message": "Aucune donnée renvoyée"}
+                        continue
+                    
+                    df = df.dropna(subset=['Close'])
+                    if not df.empty:
+                        last_row = df.iloc[-1]
+                        close_val = float(last_row['Close'])
+                        
+                        change_pct = 0
+                        if len(df) >= 2:
+                            prev_close = float(df.iloc[-2]['Close'])
+                            change_pct = ((close_val - prev_close) / prev_close) * 100
+
+                        results[ticker] = {
+                            "date": last_row.name.strftime('%Y-%m-%d'),
+                            "close": round(close_val, 3),
+                            "variation_veille": round(change_pct, 2),
+                            "high": round(float(last_row['High']), 3),
+                            "low": round(float(last_row['Low']), 3),
+                            "volume": int(last_row['Volume']),
+                            "status": "success"
+                        }
+                    else:
+                        results[ticker] = {"status": "no_data"}
+                except Exception as e:
+                    results[ticker] = {"status": "error", "message": str(e)}
 
         return jsonify(results)
     except Exception as e:
