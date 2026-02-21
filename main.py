@@ -4,12 +4,6 @@ import os
 
 app = Flask(__name__)
 
-from flask import Flask, request, jsonify
-import yfinance as yf
-import os
-
-app = Flask(__name__)
-
 @app.route('/get_stock_data', methods=['GET'])
 def get_stock_data():
     ticker_symbol = request.args.get('ticker')
@@ -18,7 +12,6 @@ def get_stock_data():
 
     try:
         stock = yf.Ticker(ticker_symbol)
-        # On demande l'historique du jour
         hist = stock.history(period="1d")
         
         if hist.empty:
@@ -49,12 +42,11 @@ def get_batch_data():
     results = {}
 
     try:
-        # On télécharge 2 jours pour tout le monde
+        # threads=False pour éviter le crash mémoire (SIGKILL) sur Render
         data = yf.download(ticker_list, period="2d", group_by='ticker', threads=False, prepost=False)
         
         for ticker in ticker_list:
             try:
-                # Extraction des lignes selon le format (MultiIndex ou Series)
                 df = data if len(ticker_list) == 1 else data[ticker]
                 df = df.dropna()
                 
@@ -84,5 +76,6 @@ def get_batch_data():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
+    # Utilisation du port fourni par Render
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
