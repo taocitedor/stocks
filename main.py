@@ -50,7 +50,7 @@ def get_batch_data():
 
     try:
         # On télécharge 2 jours pour tout le monde
-        data = yf.download(ticker_list, period="2d", group_by='ticker', threads=True)
+        data = yf.download(ticker_list, period="2d", group_by='ticker', threads=False)
         
         for ticker in ticker_list:
             try:
