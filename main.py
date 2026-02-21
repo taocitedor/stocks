@@ -42,43 +42,48 @@ def get_batch_data():
     results = {}
 
     try:
-        # On télécharge 2 jours
+        # threads=False pour éviter le crash mémoire (SIGKILL) sur Render
         data = yf.download(ticker_list, period="2d", group_by='ticker', threads=False, prepost=False)
         
         for ticker in ticker_list:
             try:
-                # FIX ICI : Si un seul ticker, yfinance ne crée pas de sous-niveau
+                # Gestion de la structure yfinance (Solo vs Multi-tickers)
                 if len(ticker_list) == 1:
                     df = data
                 else:
                     df = data[ticker]
                 
-                df = df.dropna()
+                df = df.dropna(subset=['Close'])
                 
                 if not df.empty:
                     last_row = df.iloc[-1]
+                    close_val = float(last_row['Close'])
+                    
+                    # Calcul de la variation par rapport à la veille
                     change_pct = 0
                     if len(df) >= 2:
-                        prev_close = df.iloc[-2]['Close']
-                        change_pct = ((last_row['Close'] - prev_close) / prev_close) * 100
+                        prev_close = float(df.iloc[-2]['Close'])
+                        change_pct = ((close_val - prev_close) / prev_close) * 100
 
                     results[ticker] = {
                         "date": last_row.name.strftime('%Y-%m-%d'),
-                        "close": round(last_row['Close'], 3),
+                        "close": round(close_val, 3),
                         "variation_veille": round(change_pct, 2),
-                        "high": round(last_row['High'], 3),
-                        "low": round(last_row['Low'], 3),
+                        "high": round(float(last_row['High']), 3),
+                        "low": round(float(last_row['Low']), 3),
                         "volume": int(last_row['Volume']),
                         "status": "success"
                     }
                 else:
                     results[ticker] = {"status": "no_data"}
             except Exception as e:
+                # Capture l'erreur spécifique pour ce ticker sans faire planter le batch
                 results[ticker] = {"status": "error", "message": str(e)}
 
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     # Utilisation du port fourni par Render
