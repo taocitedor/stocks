@@ -4,6 +4,12 @@ import os
 
 app = Flask(__name__)
 
+from flask import Flask, request, jsonify
+import yfinance as yf
+import os
+
+app = Flask(__name__)
+
 @app.route('/get_stock_data', methods=['GET'])
 def get_stock_data():
     ticker_symbol = request.args.get('ticker')
@@ -12,25 +18,18 @@ def get_stock_data():
 
     try:
         stock = yf.Ticker(ticker_symbol)
-        # On demande 2 jours pour calculer la variation vs veille
-        hist = stock.history(period="2d")
+        # On demande l'historique du jour
+        hist = stock.history(period="1d")
         
-        if len(hist) < 1:
-            return jsonify({"error": "Donnees introuvables"}), 404
+        if hist.empty:
+            return jsonify({"error": "Donnees introuvables pour ce ticker"}), 404
 
         last_row = hist.iloc[-1]
         
-        # Calcul de la variation (%) si on a au moins 2 jours de données
-        change_pct = 0
-        if len(hist) >= 2:
-            prev_close = hist.iloc[-2]['Close']
-            change_pct = ((last_row['Close'] - prev_close) / prev_close) * 100
-
         return jsonify({
             "ticker": ticker_symbol,
             "date": last_row.name.strftime('%Y-%m-%d'),
             "close": round(last_row['Close'], 3),
-            "variation_veille": round(change_pct, 2),
             "high": round(last_row['High'], 3),
             "low": round(last_row['Low'], 3),
             "volume": int(last_row['Volume']),
@@ -67,6 +66,7 @@ def get_batch_data():
                         change_pct = ((last_row['Close'] - prev_close) / prev_close) * 100
 
                     results[ticker] = {
+                        "date": last_row.name.strftime('%Y-%m-%d'),
                         "close": round(last_row['Close'], 3),
                         "variation_veille": round(change_pct, 2),
                         "high": round(last_row['High'], 3),
