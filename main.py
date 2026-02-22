@@ -119,8 +119,6 @@ def get_batch_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 if __name__ == "__main__":
-    # Utilisation du port fourni par Render
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    # Cloud Run utilise le port 8080 par défaut
+    app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
