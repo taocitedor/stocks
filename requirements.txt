@@ -1,3 +1,5 @@
-flask
-yfinance
+Flask
 gunicorn
+yfinance
+pandas
+requests
