@@ -150,7 +150,45 @@ def get_historic_data():
         })
     except Exception as e:
         return jsonify({"error": str(e), "status": "error"}), 500
+        
+@app.route('/get_range_data', methods=['GET'])
+def get_range_data():
+    ticker_symbol = request.args.get('ticker')
+    start_date = request.args.get('start')  # Format: YYYY-MM-DD
+    end_date = request.args.get('end')      # Format: YYYY-MM-DD
+    
+    if not all([ticker_symbol, start_date, end_date]):
+        return jsonify({"error": "Paramètres manquants : ticker, start, end"}), 400
 
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        # Note : end_date dans yfinance est exclusif, on récupère donc jusqu'à la veille de end_date
+        df = stock.history(start=start_date, end=end_date, interval="1d")
+        
+        if df.empty:
+            return jsonify({"error": "Aucune donnée sur cette période", "status": "no_data"}), 404
+
+        # Transformation du DataFrame en liste de dictionnaires
+        history_list = []
+        for index, row in df.iterrows():
+            history_list.append({
+                "date": index.strftime('%Y-%m-%d'),
+                "close": round(float(row['Close']), 3),
+                "high": round(float(row['High']), 3),
+                "low": round(float(row['Low']), 3),
+                "volume": int(row['Volume'])
+            })
+        
+        return jsonify({
+            "ticker": ticker_symbol,
+            "start": start_date,
+            "end": end_date,
+            "count": len(history_list),
+            "history": history_list,
+            "status": "success"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "error"}), 500
 
 if __name__ == "__main__":
     # Cloud Run utilise le port 8080 par défaut
