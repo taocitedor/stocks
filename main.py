@@ -119,6 +119,39 @@ def get_batch_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/get_historic_data', methods=['GET'])
+def get_historic_data():
+    ticker_symbol = request.args.get('ticker')
+    target_date = request.args.get('date')  # Format attendu: YYYY-MM-DD
+    
+    if not ticker_symbol or not target_date:
+        return jsonify({"error": "Ticker et date (YYYY-MM-DD) requis"}), 400
+
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        # On récupère une petite fenêtre autour de la date pour être sûr d'avoir la donnée
+        # (car le marché est fermé le week-end)
+        df = stock.history(start=target_date, end=None, period="1d")
+        
+        if df.empty:
+            return jsonify({"error": f"Aucune cotation pour le {target_date} (marché fermé ?)"}), 404
+
+        # On prend la ligne qui correspond exactement ou la plus proche
+        last_row = df.iloc[0]
+        
+        return jsonify({
+            "ticker": ticker_symbol,
+            "requested_date": target_date,
+            "actual_date": last_row.name.strftime('%Y-%m-%d'),
+            "close": round(last_row['Close'], 3),
+            "high": round(last_row['High'], 3),
+            "low": round(last_row['Low'], 3),
+            "status": "success"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "error"}), 500
+
+
 if __name__ == "__main__":
     # Cloud Run utilise le port 8080 par défaut
     app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
