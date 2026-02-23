@@ -82,7 +82,7 @@ def get_batch_data():
         # MODE MULTI (>1 ticker) : On utilise yf.download
         # ---------------------------------------------------------
         else:
-            data = yf.download(ticker_list, period="2d", group_by='ticker', threads=False, prepost=False)
+            data = yf.download(ticker_list, period="2d", group_by='ticker', threads=True, prepost=False)
             for ticker in ticker_list:
                 try:
                     df = data[ticker]
