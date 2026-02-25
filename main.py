@@ -190,6 +190,61 @@ def get_range_data():
     except Exception as e:
         return jsonify({"error": str(e), "status": "error"}), 500
 
+
+@app.route('/get_batch_historic', methods=['GET'])
+def get_batch_historic():
+    tickers_string = request.args.get('tickers')
+    start_date = request.args.get('start')
+    end_date = request.args.get('end')
+
+    if not all([tickers_string, start_date, end_date]):
+        return jsonify({"error": "Paramètres manquants : tickers, start, end"}), 400
+
+    ticker_list = [t.strip() for t in tickers_string.split(',')]
+    results = {}
+
+    try:
+        # threads=True pour garder ton BIT bas et ta vitesse haute
+        data = yf.download(ticker_list, start=start_date, end=end_date, group_by='ticker', threads=True)
+        
+        for ticker in ticker_list:
+            try:
+                # Récupération du DataFrame pour le ticker
+                if len(ticker_list) == 1:
+                    df = data
+                else:
+                    df = data[ticker]
+                
+                df = df.dropna(subset=['Close'])
+                
+                if df.empty:
+                    results[ticker] = {"status": "no_data", "ticker": ticker}
+                    continue
+
+                history = []
+                for index, row in df.iterrows():
+                    history.append({
+                        "date": index.strftime('%Y-%m-%d'),
+                        "open": round(float(row['Open']), 3),
+                        "high": round(float(row['High']), 3),
+                        "low": round(float(row['Low']), 3),
+                        "close": round(float(row['Close']), 3),
+                        "volume": int(row['Volume'])
+                    })
+                
+                results[ticker] = {
+                    "ticker": ticker,
+                    "status": "success",
+                    "history": history
+                }
+            except Exception as e:
+                results[ticker] = {"ticker": ticker, "status": "error", "message": str(e)}
+
+        return jsonify(results)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     # Cloud Run utilise le port 8080 par défaut
     app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
