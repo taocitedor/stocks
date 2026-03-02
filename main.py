@@ -9,6 +9,36 @@ app = Flask(__name__)
 def ping():
     return jsonify({"status": "ok"})
 
+@app.route('/test_bq', methods=['GET'])
+def test_bq():
+    project_id = request.args.get('project')
+    dataset_id = request.args.get('dataset')
+    table_id = request.args.get('table')
+
+    if not all([project_id, dataset_id, table_id]):
+        return jsonify({"error": "project, dataset, table requis"}), 400
+
+    try:
+        client = bigquery.Client(project=project_id)
+        query = f"SELECT * FROM `{dataset_id}.{table_id}` LIMIT 5"
+        df = client.query(query).to_dataframe()
+
+        # logs pour debug
+        print("=== BigQuery HEAD ===")
+        print(df.head())
+        print(df.dtypes)
+
+        return jsonify({
+            "status": "ok",
+            "rows_returned": len(df),
+            "columns": df.columns.tolist(),
+            "sample_data": df.head(3).to_dict(orient="records")
+        })
+    except Exception as e:
+        print("ERROR:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+        
+
 @app.route('/run_vlab', methods=['POST','GET'])
 def run_vlab_api():
     """
