@@ -96,8 +96,8 @@ def run_backtest_ORA():
 
     # --- Paramètres VLAB ---
     params = {
-        'PROJECT_ID': 'your_project_id',
-        'DATASET_ID': 'your_dataset',
+        'PROJECT_ID': 'project-16c606d0-6527-4644-907',
+        'DATASET_ID': 'Trading',
         'TABLE_HISTO': 'CC_Historique_Cours',
         'INDEX_TICKER_LABO': 'FCHI',
         'VLAB_USE_MARKET_FILTER': True,
