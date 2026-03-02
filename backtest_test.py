@@ -42,16 +42,13 @@ def pivot_points(df, window=3):
     return pivot_highs, pivot_lows
 
 def structure_HL(pivots_high, pivots_low):
-    """
-    Calcule HH/HL en prenant les 2 derniers pivots de chaque type
-    """
-    hh = hl = False
+    # HH = dernier pivot haut > avant dernier pivot haut
+    # HL = dernier pivot bas > avant dernier pivot bas
     if len(pivots_high) >= 2 and len(pivots_low) >= 2:
-        last_highs = [v for i,v in pivots_high[-2:]]
-        last_lows = [v for i,v in pivots_low[-2:]]
-        hh = last_highs[-1] > last_highs[-2]
-        hl = last_lows[-1] > last_lows[-2]
-    return hh, hl
+        hh = pivots_high[-1][1] > pivots_high[-2][1]
+        hl = pivots_low[-1][1] > pivots_low[-2][1]
+        return hh, hl
+    return False, False
 
 def sqz_exact(df, period=20):
     closes = df['Close'].tail(period)
