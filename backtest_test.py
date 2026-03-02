@@ -1,183 +1,166 @@
-from google.cloud import bigquery
+# =========================
+# backtest_test.py - VLAB v1.7.2 pour ORA.PA
+# =========================
 import pandas as pd
 import numpy as np
+import yfinance as yf
 
+# -------------------------
+# CONFIG
+# -------------------------
+TICKER = "ORA.PA"
+INDEX_TICKER = "^FCHI"
+START_DATE = "2020-01-01"
+SCORE_THRESHOLD = 86
+GLOBAL_SAMPLES = 63
 
-# ==============================
-# INDICATEURS
-# ==============================
-
-def SMA(series, period):
-    return series.rolling(period).mean()
-
-
-def ATR(df, period):
-    high_low = df['High'] - df['Low']
-    high_close = np.abs(df['High'] - df['Close'].shift())
-    low_close = np.abs(df['Low'] - df['Close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
-
-
-def RSI(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = -delta.clip(upper=0).rolling(period).mean()
-    loss = loss.replace(0, np.nan)  # protection division 0
-    rs = gain / loss
+# -------------------------
+# INDICATEURS VLAB
+# -------------------------
+def vlab_rsi(close, period=14):
+    gains, losses = 0, 0
+    for i in range(len(close)-period, len(close)):
+        delta = close.iloc[i] - close.iloc[i-1]
+        if delta > 0:
+            gains += delta
+        else:
+            losses -= delta
+    if losses == 0:
+        return 100
+    rs = gains / losses
     return 100 - (100 / (1 + rs))
 
+def vlab_rs(stock_df, index_df):
+    if len(stock_df) < 63:
+        return 0
+    p0s = stock_df['Close'].iloc[-1]
+    p63s = stock_df['Close'].iloc[-63]
+    current_date = stock_df.index[-1]
+    
+    idx_filtered = index_df[index_df.index <= current_date]
+    if len(idx_filtered) < 63:
+        return 0
+    
+    idx_sorted = idx_filtered.sort_index(ascending=False)
+    idx0 = idx_sorted['Close'].iloc[0]
+    idx63 = idx_sorted['Close'].iloc[62]
+    
+    return ((p0s - p63s)/p63s - (idx0 - idx63)/idx63) * 100
 
-# ==============================
-# CONFIG
-# ==============================
-
-PROJECT_ID = "project-16c606d0-6527-4644-907"
-DATASET_ID = "Trading"
-TABLE_HISTO = "CC_Historique_Cours"
-
-TICKER = "ORA.PA"
-
-VLAB_GLOBAL_SCORE = 86
-VLAB_POS_SIZE = 1000
-VLAB_FEES = 0.0056
-VLAB_ATR_PERIOD = 14
-
-
-# ==============================
-# BACKTEST DEBUG COMPLET
-# ==============================
-
-def run_backtest_ORA():
-
-    logs = []
-    trades = []
-
-    try:
-
-        logs.append("=== START BACKTEST ORA.PA ===")
-
-        # ----------------------
-        # BigQuery
-        # ----------------------
-        client = bigquery.Client(project=PROJECT_ID)
-
-        query = f"""
-        SELECT *
-        FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_HISTO}`
-        WHERE Ticker = '{TICKER}'
-        ORDER BY Date ASC
-        """
-
-        df = client.query(query).to_dataframe()
-
-        if df.empty:
-            return {
-                "status": "error",
-                "message": "Aucune donnée récupérée",
-                "logs": logs
-            }
-
-        logs.append(f"Données récupérées : {len(df)} lignes")
-
-        # ----------------------
-        # Nettoyage sécurisé
-        # ----------------------
-        df['Close'] = pd.to_numeric(df['Close'], errors="coerce")
-        df['High'] = pd.to_numeric(df['High'], errors="coerce")
-        df['Low'] = pd.to_numeric(df['Low'], errors="coerce")
-        df['Volume'] = pd.to_numeric(df['Volume'], errors="coerce")
-        df['Date'] = pd.to_datetime(df['Date'], errors="coerce")
-
-        df = df.dropna().reset_index(drop=True)
-
-        logs.append(f"Lignes après nettoyage : {len(df)}")
-
-        # ----------------------
-        # ANALYSE STATISTIQUE
-        # ----------------------
-        logs.append("=== ANALYSE STATISTIQUE ===")
-
-        df["RSI"] = RSI(df["Close"])
-        df["MM20"] = df["Close"].rolling(20).mean()
-        df["dist_mm20_pct"] = abs(df["Close"] - df["MM20"]) / df["MM20"]
-
-        logs.append(f"RSI min : {round(df['RSI'].min(),2)}")
-        logs.append(f"RSI max : {round(df['RSI'].max(),2)}")
-        logs.append(f"RSI moyen : {round(df['RSI'].mean(),2)}")
-
-        logs.append(f"Distance MM20 moyenne : {round(df['dist_mm20_pct'].mean(),4)}")
-        logs.append(f"Distance MM20 max : {round(df['dist_mm20_pct'].max(),4)}")
-
-        logs.append(f"Close min : {df['Close'].min()}")
-        logs.append(f"Close max : {df['Close'].max()}")
-
-        logs.append(f"Nombre Close = 0 : {(df['Close']==0).sum()}")
-
-        # ----------------------
-        # BOUCLE DEBUG SCORE
-        # ----------------------
-        max_score = 0
-        score_values = []
-
-        for i in range(63, len(df)):
-
-            curr = df.iloc[i]
-            sub_df = df.iloc[:i+1]
-
-            curr_close = curr['Close']
-            if pd.isna(curr_close) or curr_close == 0:
+def vlab_pivots(df, w=3):
+    pivots = []
+    for i in range(w, len(df)-w):
+        isH, isL = True, True
+        for j in range(i-w, i+w+1):
+            if j == i:
                 continue
+            if df['High'].iloc[j] >= df['High'].iloc[i]:
+                isH = False
+            if df['Low'].iloc[j] <= df['Low'].iloc[i]:
+                isL = False
+        if isH:
+            pivots.append(("H", df['High'].iloc[i]))
+        if isL:
+            pivots.append(("L", df['Low'].iloc[i]))
+    return pivots
 
-            rsi = RSI(sub_df["Close"]).iloc[-1]
-            mm20 = sub_df["Close"].tail(20).mean()
+def vlab_structure(pivots):
+    highs = [p[1] for p in pivots if p[0] == "H"]
+    lows  = [p[1] for p in pivots if p[0] == "L"]
+    
+    if len(highs) < 2 or len(lows) < 2:
+        return "ND"
+    
+    isHH = highs[-1] > highs[-2]
+    isHL = lows[-1] > lows[-2]
+    
+    return ("HH" if isHH else "LH") + "+" + ("HL" if isHL else "LL")
 
-            if pd.isna(rsi) or pd.isna(mm20) or mm20 == 0:
-                continue
+def vlab_squeeze(df):
+    if len(df) < 20:
+        return False
+    last20 = df.tail(20)
+    cls = last20['Close']
+    sma = cls.mean()
+    sd = cls.std()
+    atr = (last20['High'] - last20['Low']).mean()
+    return (sma + 2*sd < sma + 1.5*atr) and (sma - 2*sd > sma - 1.5*atr)
 
-            score = 0
+# -------------------------
+# SCORING VLAB
+# -------------------------
+def vlab_score(stock_df, index_df, debug=False):
+    score = 0
+    rs = vlab_rs(stock_df, index_df)
+    if rs <= 0:
+        if debug: print("RS <= 0 → score = 0")
+        return 0
+    
+    cls = stock_df['Close']
+    rsi = vlab_rsi(cls)
+    if 50 <= rsi <= 70:
+        score += 15
+    
+    vol_mean = stock_df['Volume'].tail(20).mean()
+    vol_ratio = stock_df['Volume'].iloc[-1] / (vol_mean if vol_mean != 0 else 1)
+    
+    if vol_ratio > 1.5:
+        score += 25
+    elif vol_ratio > 1.1:
+        score += 12.5
+    
+    mm20 = cls.tail(20).mean()
+    dist = abs(cls.iloc[-1] - mm20) / mm20
+    if dist <= 0.01:
+        score += 20 if cls.iloc[-1] >= mm20 else -10
+    
+    piv = vlab_pivots(stock_df)
+    struct = vlab_structure(piv[-15:])
+    if "HH" in struct and "HL" in struct:
+        score += 30
+    
+    if vlab_squeeze(stock_df):
+        score += 10
+    
+    if debug:
+        print("RS:", round(rs,2))
+        print("RSI:", round(rsi,2))
+        print("Volume ratio:", round(vol_ratio,2))
+        print("MM20 distance:", round(dist,4))
+        print("Structure:", struct)
+        print("Squeeze:", vlab_squeeze(stock_df))
+        print("FINAL SCORE:", score)
+    
+    return score
 
-            rsi_ok = 50 <= rsi <= 70
-            prox_ok = abs(curr_close - mm20)/mm20 <= 0.01
+# -------------------------
+# FONCTION PRINCIPALE BACKTEST
+# -------------------------
+def run_backtest_ORA(debug_date=None):
+    print("=== START BACKTEST ORA.PA ===")
+    
+    stock = yf.download(TICKER, start=START_DATE, progress=False)[['Close','High','Low','Volume']]
+    index = yf.download(INDEX_TICKER, start=START_DATE, progress=False)[['Close','High','Low','Volume']]
+    
+    stock.dropna(inplace=True)
+    index.dropna(inplace=True)
+    
+    if debug_date:
+        stock = stock.loc[:debug_date]
+    
+    if len(stock) < GLOBAL_SAMPLES:
+        print("Not enough data for backtest")
+        return
+    
+    score = vlab_score(stock, index, debug=True)
+    print("Score final:", score)
+    print("Seuil entrée:", SCORE_THRESHOLD)
+    print("Signal:", "ACHAT" if score >= SCORE_THRESHOLD else "PAS D'ENTRÉE")
+    return score
 
-            if rsi_ok:
-                score += 15
-            if prox_ok:
-                score += 20
-
-            score_values.append(score)
-
-            if score > max_score:
-                max_score = score
-                logs.append(
-                    f"NOUVEAU MAX SCORE {score} "
-                    f"Date={curr['Date']} RSI={round(rsi,2)} "
-                    f"DistMM20={round(abs(curr_close-mm20)/mm20,4)}"
-                )
-
-        # ----------------------
-        # STAT SCORE
-        # ----------------------
-        logs.append("=== STAT SCORE ===")
-
-        if score_values:
-            logs.append(f"Score max : {max_score}")
-            logs.append(f"Score moyen : {round(np.mean(score_values),2)}")
-            logs.append(f"Score > 0 : {sum(1 for s in score_values if s > 0)}")
-            logs.append(f"Score = 35 : {sum(1 for s in score_values if s == 35)}")
-
-        logs.append(f"Seuil entrée : {VLAB_GLOBAL_SCORE}")
-
-        return {
-            "status": "ok",
-            "nb_trades": len(trades),
-            "logs": logs
-        }
-
-    except Exception as e:
-        logs.append(f"EXCEPTION: {str(e)}")
-        return {
-            "status": "error",
-            "message": str(e),
-            "logs": logs
-        }
+# -------------------------
+# MAIN
+# -------------------------
+if __name__ == "__main__":
+    # Debug sur une date historique pour vérifier signal
+    run_backtest_ORA("2024-05-31")
