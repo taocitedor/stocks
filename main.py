@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from vlab_optimized import run_vlab
+from google.cloud import bigquery
 import yfinance as yf
 import os
 
