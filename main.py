@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify
-from vlab_optimized import run_vlab
 from google.cloud import bigquery
 import yfinance as yf
 import os
@@ -49,28 +48,6 @@ def test_bq():
         print("ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
         
-
-@app.route('/run_vlab', methods=['POST','GET'])
-def run_vlab_api():
-    """
-    API pour recevoir les paramètres JSON depuis GAS et renvoyer les stats
-    Exemple JSON envoyé depuis GAS :
-    {
-        "PROJECT_ID": "mon_projet",
-        "DATASET_ID": "Trading",
-        "TABLE_HISTO": "CC_Historique_Cours",
-        "VLAB_GLOBAL_SCORE": 86,
-        "VLAB_USE_MARKET_FILTER": true,
-        "VLAB_POS_SIZE": 4000,
-        "VLAB_FEES": 0.0056
-        // ... autres paramètres
-    }
-    """
-    params = request.json  # récupère le JSON envoyé par GAS
-    result = run_vlab(params)  # appelle ton module Python
-    return jsonify(result)     # renvoie les stats à GAS en JSON
-
-
 
 @app.route('/get_stock_data', methods=['GET'])
 def get_stock_data():
