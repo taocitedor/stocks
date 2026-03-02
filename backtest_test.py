@@ -84,12 +84,13 @@ def get_score(sub_df, index_df, logs=None):
     return score
 
 # -------------------
-# BACKTEST PRINCIPAL
+# BACKTEST PRINCIPAL AVEC LOG DETAIL INDEX
 # -------------------
 
 def run_backtest_ORA():
     """
     Backtest optimisé pour ORA.PA avec logs détaillés
+    et logs explicites quand l'index est manquant
     """
 
     # --- Paramètres VLAB ---
@@ -152,10 +153,17 @@ def run_backtest_ORA():
         if params['VLAB_USE_MARKET_FILTER']:
             idx_row = index_df[index_df['Date']==curr_date]
             if idx_row.empty:
-                logs.append(f"{curr_date.date()} - skipped (index date missing)")
+                # --- LOG DÉTAILLÉ ---
+                prev_idx = index_df[index_df['Date'] < curr_date]['Date'].max()
+                next_idx = index_df[index_df['Date'] > curr_date]['Date'].min()
+                logs.append(
+                    f"{curr_date.date()} - skipped (index date missing) "
+                    f"| dernière date dispo avant: {prev_idx} "
+                    f"| prochaine date dispo après: {next_idx}"
+                )
                 continue
             if curr_close < idx_row['SMA100'].values[0]:
-                logs.append(f"{curr_date.date()} - skipped (close below SMA100)")
+                logs.append(f"{curr_date.date()} - skipped (close below SMA100={idx_row['SMA100'].values[0]:.2f})")
                 continue
             slope = idx_row['SLOPE'].values[0]
 
