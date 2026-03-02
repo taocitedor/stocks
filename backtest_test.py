@@ -17,7 +17,7 @@ def ATR(df, period):
     return tr.rolling(period).mean()
 
 def RSI_Wilder(series, period=14):
-    """RSI Wilder (Smoothing exponentiel) - Standard Labo"""
+    """RSI Wilder (Standard Professionnel)"""
     delta = series.diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -27,11 +27,10 @@ def RSI_Wilder(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def get_pivots_anti_bias(df_slice, window=3):
-    """Détecte les pivots validés SANS regarder le futur (validation à i+window)"""
+    """Détection des pivots sans biais du futur"""
     highs = df_slice['High'].values
     lows = df_slice['Low'].values
     p_highs, p_lows = [], []
-    # On s'arrête à len-window pour ne pas tricher
     for i in range(window, len(df_slice) - window):
         if all(highs[i] >= highs[j] for j in range(i-window, i+window+1) if i!=j):
             p_highs.append(highs[i])
@@ -40,20 +39,16 @@ def get_pivots_anti_bias(df_slice, window=3):
     return p_highs, p_lows
 
 def calculate_vlab_score(sub_df):
-    """Calcul du score 0-100 identique au GAS"""
+    """Calcul du score 0-100 synchronisé GAS"""
     cls = sub_df['Close']
     rsi = RSI_Wilder(cls).iloc[-1]
-    # Volume Ratio vs 20 jours précédents (excluant J)
     vol_prev_mean = sub_df['Volume'].iloc[:-1].tail(20).mean()
     v_ratio = sub_df['Volume'].iloc[-1] / (vol_prev_mean or 1)
-    
     mm20 = cls.tail(20).mean()
     dist_mm20 = abs(cls.iloc[-1] - mm20) / mm20
-    
     p_h, p_l = get_pivots_anti_bias(sub_df, window=3)
     hh = len(p_h) >= 2 and p_h[-1] >= p_h[-2]
     hl = len(p_l) >= 2 and p_l[-1] >= p_l[-2]
-    
     std20 = cls.tail(20).std()
     atr20 = (sub_df['High'].tail(20) - sub_df['Low'].tail(20)).mean()
     is_sqz = (mm20 + 2*std20 < mm20 + 1.5*atr20) and (mm20 - 2*std20 > mm20 - 1.5*atr20)
@@ -66,13 +61,13 @@ def calculate_vlab_score(sub_df):
         score += 20 if cls.iloc[-1] >= mm20 else -10
     if hh and hl: score += 30
     if is_sqz: score += 10
-    return score
+    return float(score)
 
 # -------------------
-# BACKTESTER V-LAB
+# FONCTION PRINCIPALE
 # -------------------
 
-def run_vlab_backtest_full():
+def run_vlab_backtest_full(): # Nom conservé pour ton interface
     p = {
         'PROJECT_ID': 'project-16c606d0-6527-4644-907',
         'DATASET_ID': 'Trading',
@@ -94,7 +89,6 @@ def run_vlab_backtest_full():
         'VLAB_POS_SIZE': 4000
     }
 
-    # Fetch Data
     client = bigquery.Client(project=p['PROJECT_ID'])
     query = f"SELECT * FROM `{p['DATASET_ID']}.{p['TABLE_HISTO']}` WHERE Ticker IN ('ORA.PA','{p['INDEX_TICKER']}') ORDER BY Date ASC"
     df_raw = client.query(query).to_dataframe()
@@ -105,80 +99,56 @@ def run_vlab_backtest_full():
     df_ora = df_raw[df_raw['Ticker']=='ORA.PA'].sort_values('Date').reset_index(drop=True)
     df_idx = df_raw[df_raw['Ticker']==p['INDEX_TICKER']].sort_values('Date').reset_index(drop=True)
 
-    # Pré-calculs Index
     df_idx['SMA100'] = SMA(df_idx['Close'], p['VLAB_MARKET_SMA_PERIOD'])
     df_idx['SLOPE'] = df_idx['SMA100'].pct_change(5)
 
     trades = []
     in_pos = False
-    ePrice = 0
-    hasReachedBE = False
-    active_tp = 0
-    active_be_trigger = 0
+    ePrice, hasReachedBE = 0, False
+    active_tp, active_be_trigger = 0, 0
 
     for i in range(p['VLAB_GLOBAL_SAMPLES'], len(df_ora)):
         curr = df_ora.loc[i]
-        sub_df = df_ora.loc[:i]
         
-        # 1. GESTION SORTIE (Prioritaire)
         if in_pos:
             perf_h = (curr['High'] - ePrice) / ePrice
             perf_l = (curr['Low'] - ePrice) / ePrice
+            if not hasReachedBE and perf_h >= active_be_trigger: hasReachedBE = True
             
-            if not hasReachedBE and perf_h >= active_be_trigger:
-                hasReachedBE = True
-            
-            # SL dynamique : Si BE activé -> Sortie aux frais, sinon SL 10%
-            effective_sl = p['VLAB_FEES'] if hasReachedBE else -p['VLAB_SL']
-            
-            hit_tp = perf_h >= active_tp
-            hit_sl = perf_l <= effective_sl
+            eff_sl = p['VLAB_FEES'] if hasReachedBE else -p['VLAB_SL']
+            hit_tp, hit_sl = perf_h >= active_tp, perf_l <= eff_sl
 
             if hit_tp or hit_sl:
-                # Priorité SL en cas de bougie ambiguë
-                final_perf = effective_sl if (hit_sl and not hit_tp) else active_tp
+                final_perf = eff_sl if (hit_sl and not hit_tp) else active_tp
                 trades.append({
-                    'Date_Achat': entry_date,
-                    'Date_Vente': curr['Date'],
                     'Status': "GAGNÉ" if final_perf > 0.05 else ("NEUTRE" if hasReachedBE else "PERDU"),
-                    'Gain_Net': (final_perf - p['VLAB_FEES']) * p['VLAB_POS_SIZE']
+                    'Gain_Net': float((final_perf - p['VLAB_FEES']) * p['VLAB_POS_SIZE'])
                 })
                 in_pos = False
             continue
 
-        # 2. FILTRE DE MARCHÉ (Application de l'interrupteur)
         idx_row = df_idx[df_idx['Date'] == curr['Date']]
         if idx_row.empty: continue
         
-        fchi_c = idx_row['Close'].values[0]
-        fchi_sma = idx_row['SMA100'].values[0]
-        fchi_slope = idx_row['SLOPE'].values[0]
+        fchi_c, fchi_sma, fchi_slope = idx_row['Close'].values[0], idx_row['SMA100'].values[0], idx_row['SLOPE'].values[0]
 
-        if p['VLAB_USE_MARKET_FILTER'] and fchi_c < fchi_sma:
-            continue
+        if p['VLAB_USE_MARKET_FILTER'] and fchi_c < fchi_sma: continue
 
-        # 3. SCORE ET ENTRÉE
-        score = calculate_vlab_score(sub_df)
-        if score >= p['VLAB_GLOBAL_SCORE']:
-            atr_val = ATR(sub_df, p['VLAB_ATR_PERIOD']).iloc[-1]
-            vol_pct = atr_val / curr['Close']
-            
-            # Calcul des cibles dynamiques au moment de l'achat
+        if calculate_vlab_score(df_ora.loc[:i]) >= p['VLAB_GLOBAL_SCORE']:
+            vol_pct = ATR(df_ora.loc[:i], p['VLAB_ATR_PERIOD']).iloc[-1] / curr['Close']
             active_tp = p['VLAB_TP_TREND'] if fchi_slope >= p['VLAB_TREND_THRESHOLD'] else p['VLAB_TP_RANGE']
             active_be_trigger = p['VLAB_BE_FAST'] if (fchi_slope >= 0.004 and vol_pct < p['VLAB_VOLAT_LIMIT']) else p['VLAB_BE_SLOW']
-            
-            in_pos = True
-            ePrice = curr['Close']
-            entry_date = curr['Date']
-            hasReachedBE = False
+            in_pos, ePrice, hasReachedBE = True, curr['Close'], False
 
-    # Résultat Final
-    report = pd.DataFrame(trades)
-    print(f"\n=== BACKTEST V-LAB FINAL (Filter: {p['VLAB_USE_MARKET_FILTER']}) ===")
-    print(f"Gain Total : {report['Gain_Net'].sum():.2f} €")
-    print(f"Nb Trades  : {len(report)}")
-    print(report['Status'].value_counts() if not report.empty else "Aucun trade")
-    return report
+    # --- PRÉPARATION JSON SERIALIZABLE ---
+    report_df = pd.DataFrame(trades)
+    res = {
+        "status": "success",
+        "gain_total": float(report_df['Gain_Net'].sum()) if not report_df.empty else 0.0,
+        "nb_trades": len(report_df),
+        "details": report_df['Status'].value_counts().to_dict() if not report_df.empty else {}
+    }
+    return res
 
 if __name__ == "__main__":
-    run_vlab_backtest_full()
+    print(run_backtest_ORA())
