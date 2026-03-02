@@ -119,7 +119,7 @@ def run_backtest_ORA():
 
     # --- Connexion BigQuery ---
     client = bigquery.Client(project=params['PROJECT_ID'])
-    query = f"SELECT * FROM `{params['DATASET_ID']}.{params['TABLE_HISTO']}` WHERE Ticker='ORA.PA' ORDER BY Date ASC"
+    query = f"SELECT * FROM `{params['DATASET_ID']}.{params['TABLE_HISTO']}` WHERE Ticker IN ('ORA.PA','^FCHI') ORDER BY Date ASC"
     df = client.query(query).to_dataframe()
 
     df['Close'] = df['Close'].astype(float)
