@@ -24,15 +24,43 @@ def RSI(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def pivot_points(df, window=3):
-    highs = df['High']
-    lows = df['Low']
+def pivot_points(df, window=3, strict=False):
+    """
+    Détecte les pivots hauts et bas dans un DataFrame.
+    
+    Args:
+        df (pd.DataFrame): colonnes 'High' et 'Low'
+        window (int): nombre de barres avant/après à considérer
+        strict (bool): 
+            - False → comportement GAS original (>= ou <= tous voisins)
+            - True  → comportement strict Python (== max/min)
+    
+    Returns:
+        pivot_highs, pivot_lows : listes de tuples (index, valeur)
+    """
+    highs = df['High'].values
+    lows = df['Low'].values
     pivot_highs, pivot_lows = [], []
+
     for i in range(window, len(df)-window):
-        if highs[i] == highs[i-window:i+window+1].max():
-            pivot_highs.append((i, highs[i]))
-        if lows[i] == lows[i-window:i+window+1].min():
-            pivot_lows.append((i, lows[i]))
+        window_high = highs[i-window:i+window+1]
+        window_low = lows[i-window:i+window+1]
+        
+        if strict:
+            # version stricte = max/min exact
+            if highs[i] == window_high.max():
+                pivot_highs.append((i, highs[i]))
+            if lows[i] == window_low.min():
+                pivot_lows.append((i, lows[i]))
+        else:
+            # version GAS = >= / <= voisins
+            isH = all(highs[i] >= window_high[j] for j in range(len(window_high)) if j != window)
+            isL = all(lows[i] <= window_low[j] for j in range(len(window_low)) if j != window)
+            if isH:
+                pivot_highs.append((i, highs[i]))
+            if isL:
+                pivot_lows.append((i, lows[i]))
+
     return pivot_highs, pivot_lows
 
 def structure_HL(pivots_high, pivots_low):
