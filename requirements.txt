@@ -3,3 +3,5 @@ gunicorn
 yfinance
 pandas
 requests
+google-cloud-bigquery
+numpy
