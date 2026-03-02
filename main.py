@@ -9,7 +9,7 @@ app = Flask(__name__)
 @app.route("/run_test", methods=["GET"])
 def run_test():
     try:
-        result = backtest_test.run_backtest_ORA()
+        result = backtest_test.run_vlab_backtest_full()
         return jsonify(result)
     except Exception as e:
         return jsonify({"status":"error", "message": str(e)})
