@@ -3,8 +3,18 @@ from vlab_optimized import run_vlab
 from google.cloud import bigquery
 import yfinance as yf
 import os
+import backtest_test
 
 app = Flask(__name__)
+
+@app.route("/run_test", methods=["GET"])
+def run_test():
+    try:
+        result = backtest_test.run_backtest_ORA()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"status":"error", "message": str(e)})
+
 
 @app.route('/ping', methods=['GET', 'POST'])
 def ping():
