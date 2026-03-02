@@ -133,7 +133,7 @@ def run_vlab(params):
 
             # TP dynamique
             currentTP = params['VLAB_TP_TREND'] if slope >= params['VLAB_TREND_THRESHOLD'] else params['VLAB_TP_RANGE']
-            atr = ATR(sub_df.tail(params['VLAB_ATR_PERIOD'])).iloc[-1]
+            atr = ATR(sub_df, params['VLAB_ATR_PERIOD']).iloc[-1]
             vol_pct = atr / curr_close
             currentBE = params['VLAB_BE_FAST'] if slope >= 0.004 and vol_pct < params['VLAB_VOLAT_LIMIT'] else params['VLAB_BE_SLOW']
 
