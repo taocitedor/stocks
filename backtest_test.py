@@ -1,4 +1,4 @@
-# vlab_backtest_ORA_v2.py
+# vlab_backtest_ORA_final.py
 import pandas as pd
 import numpy as np
 from google.cloud import bigquery
@@ -24,46 +24,27 @@ def RSI(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def pivot_points(df, window=3, strict=False):
+def pivot_points(df, window=3):
     """
-    Détecte les pivots hauts et bas dans un DataFrame.
-    
-    Args:
-        df (pd.DataFrame): colonnes 'High' et 'Low'
-        window (int): nombre de barres avant/après à considérer
-        strict (bool): 
-            - False → comportement GAS original (>= ou <= tous voisins)
-            - True  → comportement strict Python (== max/min)
-    
-    Returns:
-        pivot_highs, pivot_lows : listes de tuples (index, valeur)
+    Version GAS : détecte pivots hauts/bas
     """
     highs = df['High'].values
     lows = df['Low'].values
     pivot_highs, pivot_lows = [], []
 
     for i in range(window, len(df)-window):
-        window_high = highs[i-window:i+window+1]
-        window_low = lows[i-window:i+window+1]
-        
-        if strict:
-            # version stricte = max/min exact
-            if highs[i] == window_high.max():
-                pivot_highs.append((i, highs[i]))
-            if lows[i] == window_low.min():
-                pivot_lows.append((i, lows[i]))
-        else:
-            # version GAS = >= / <= voisins
-            isH = all(highs[i] >= window_high[j] for j in range(len(window_high)) if j != window)
-            isL = all(lows[i] <= window_low[j] for j in range(len(window_low)) if j != window)
-            if isH:
-                pivot_highs.append((i, highs[i]))
-            if isL:
-                pivot_lows.append((i, lows[i]))
-
+        isH = all(highs[i] >= highs[i-window:i+window+1][j] for j in range(2*window+1) if j != window)
+        isL = all(lows[i] <= lows[i-window:i+window+1][j] for j in range(2*window+1) if j != window)
+        if isH:
+            pivot_highs.append((i, highs[i]))
+        if isL:
+            pivot_lows.append((i, lows[i]))
     return pivot_highs, pivot_lows
 
 def structure_HL(pivots_high, pivots_low):
+    """
+    Calcule HH/HL en prenant les 2 derniers pivots de chaque type
+    """
     hh = hl = False
     if len(pivots_high) >= 2 and len(pivots_low) >= 2:
         last_highs = [v for i,v in pivots_high[-2:]]
@@ -82,6 +63,9 @@ def sqz_exact(df, period=20):
     return (sma + 2*sd < sma + 1.5*atr) and (sma - 2*sd > sma - 1.5*atr)
 
 def get_score(sub_df, index_df, logs=None):
+    """
+    Calcul du score identique au GAS pour ouverture position
+    """
     if len(sub_df) < 63:
         if logs: logs.append(f"{sub_df['Date'].iloc[-1]} - Score skipped (not enough data)")
         return 0
@@ -98,12 +82,22 @@ def get_score(sub_df, index_df, logs=None):
     hh, hl = structure_HL(pivots_high, pivots_low)
     s_sqz = sqz_exact(sub_df)
     
+    # --- Score détaillé identique GAS ---
     score = 0
-    score += 15 if 50 <= rsi <= 70 else 0
-    score += 25 if v_ratio > 1.5 else 12.5 if v_ratio > 1.1 else 0
-    score += 20 if abs(sub_df['Close'].iloc[-1] - mm20)/mm20 <= 0.01 and sub_df['Close'].iloc[-1]>=mm20 else -10 if abs(sub_df['Close'].iloc[-1] - mm20)/mm20 <= 0.01 else 0
-    score += 30 if hh and hl else 0
-    score += 10 if s_sqz else 0
+    # RSI
+    if 50 <= rsi <= 70: score += 15
+    # Volume
+    if v_ratio > 1.5: score += 25
+    elif v_ratio > 1.1: score += 12.5
+    # MM20
+    close_vs_mm20 = abs(sub_df['Close'].iloc[-1] - mm20)/mm20
+    if close_vs_mm20 <= 0.01:
+        if sub_df['Close'].iloc[-1] >= mm20: score += 20
+        else: score -= 10
+    # Structure HH/HL
+    if hh and hl: score += 30
+    # Squeeze
+    if s_sqz: score += 10
 
     if logs:
         logs.append(f"{sub_df['Date'].iloc[-1]} - RSI:{rsi:.2f}, v_ratio:{v_ratio:.2f}, MM20:{mm20:.2f}, HH:{hh}, HL:{hl}, Sqz:{s_sqz}, Score={score:.2f}")
@@ -134,8 +128,7 @@ def run_backtest_ORA():
         'VLAB_POS_SIZE': 4000
     }
 
-    logs = []
-    logs.append("=== START BACKTEST ORA.PA ===")
+    logs = ["=== START BACKTEST ORA.PA ==="]
 
     # --- Connexion BigQuery ---
     client = bigquery.Client(project=params['PROJECT_ID'])
@@ -153,11 +146,9 @@ def run_backtest_ORA():
     df['Date'] = pd.to_datetime(df['Date'])
     logs.append(f"Données récupérées : {len(df)} lignes pour ORA.PA + ^FCHI")
 
-    # --- Séparer ORA et FCHI ---
     df_or = df[df['Ticker']=='ORA.PA'].sort_values('Date').reset_index(drop=True)
     df_idx = df[df['Ticker']==params['INDEX_TICKER_LABO']].sort_values('Date').reset_index(drop=True)
 
-    # SMA100 sur FCHI
     if params['VLAB_USE_MARKET_FILTER']:
         df_idx['SMA100'] = SMA(df_idx['Close'], params['VLAB_MARKET_SMA_PERIOD'])
         df_idx['SMA100_PREV'] = df_idx['SMA100'].shift(5)
@@ -174,15 +165,13 @@ def run_backtest_ORA():
         curr_close = curr['Close']
         sub_df = df_or.loc[:i]
 
-        # --- Filtre marché ---
         slope = 0.0
         if params['VLAB_USE_MARKET_FILTER']:
             idx_row = df_idx[df_idx['Date']==curr_date]
             if idx_row.empty:
-                # On log toutes les infos possibles
                 last_date_before = df_idx[df_idx['Date'] < curr_date]['Date'].max()
                 next_date_after = df_idx[df_idx['Date'] > curr_date]['Date'].min()
-                logs.append(f"{curr_date.date()} - skipped (index date missing) | derniere date dispo avant: {last_date_before} | prochaine date dispo apres: {next_date_after}")
+                logs.append(f"{curr_date.date()} - skipped (index date missing) | last before: {last_date_before} | next after: {next_date_after}")
                 continue
 
             fchi_close = idx_row['Close'].values[0]
@@ -236,7 +225,6 @@ def run_backtest_ORA():
             hasReachedBE = False
             logs.append(f"Ouverture position ORA.PA le {curr_date.date()} Close={curr_close:.2f} Score={score:.2f}")
 
-    # Stats finales
     nb_total = len(trades)
     nb_gagnes = sum(1 for t in trades if t['Status']=="GAGNÉ")
     nb_neutres = sum(1 for t in trades if t['Status']=="NEUTRE")
