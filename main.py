@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from vlab_module_optimized import run_vlab
+from vlab_optimized import run_vlab
 import yfinance as yf
 import os
 
