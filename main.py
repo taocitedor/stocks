@@ -5,7 +5,7 @@ import os
 
 app = Flask(__name__)
 
-@app.route('/run_vlab', methods=['POST'])
+@app.route('/run_vlab', methods=['POST','GET'])
 def run_vlab_api():
     """
     API pour recevoir les paramètres JSON depuis GAS et renvoyer les stats
