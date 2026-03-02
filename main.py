@@ -5,6 +5,10 @@ import os
 
 app = Flask(__name__)
 
+@app.route('/ping', methods=['GET', 'POST'])
+def ping():
+    return jsonify({"status": "ok"})
+
 @app.route('/run_vlab', methods=['POST','GET'])
 def run_vlab_api():
     """
