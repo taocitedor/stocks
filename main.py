@@ -8,7 +8,7 @@ import sigma
 app = Flask(__name__)
 
 @app.route("/run_test2", methods=["GET"])
-def run_test():
+def run_test2():
     try:
         result = sigma.sigma_engine()
         return jsonify(result)
