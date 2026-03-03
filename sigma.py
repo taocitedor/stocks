@@ -25,7 +25,7 @@ ALPHA_CFG = {
     'SIZE': 4000
 }
 
-def sigma.alpha_engine_v3():
+def alpha_engine_v3():
     # 1. ACQUISITION & NETTOYAGE
     client = bigquery.Client(project=ALPHA_CFG['PROJECT'])
     query = f"""
