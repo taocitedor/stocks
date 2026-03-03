@@ -10,7 +10,7 @@ app = Flask(__name__)
 @app.route("/run_test2", methods=["GET"])
 def run_test2():
     try:
-        result = sigma.sigma_engine()
+        result = sigma.alpha_engine_v3()
         return jsonify(result)
     except Exception as e:
         return jsonify({"status":"error", "message": str(e)})
