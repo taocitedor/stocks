@@ -3,8 +3,18 @@ from google.cloud import bigquery
 import yfinance as yf
 import os
 import backtest_test
+import sigma
 
 app = Flask(__name__)
+
+@app.route("/run_test2", methods=["GET"])
+def run_test():
+    try:
+        result = sigma.sigma_engine()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"status":"error", "message": str(e)})
+
 
 @app.route("/run_test", methods=["GET"])
 def run_test():
