@@ -93,86 +93,92 @@ def get_batch_data():
     if not tickers_string:
         return jsonify({"error": "Aucun ticker fourni"}), 400
 
-    ticker_list = tickers_string.split(',')
+    ticker_list = [t.strip() for t in tickers_string.split(',')]
     results = {}
 
     try:
         # ---------------------------------------------------------
-        # MODE SOLO (1 ticker) : On utilise yf.Ticker (100% fiable)
+        # MODE SOLO (1 ticker) : Utilisation de yf.Ticker
         # ---------------------------------------------------------
         if len(ticker_list) == 1:
             ticker = ticker_list[0]
             try:
-                stock = yf.Ticker(ticker)
-                df = stock.history(period="2d")
-                
-                if df.empty or 'Close' not in df.columns:
-                    results[ticker] = {"status": "no_data", "message": "Aucune donnée renvoyée"}
+                t_obj = yf.Ticker(ticker)
+                df = t_obj.history(period="5d") # 5j pour assurer la veille
+                if df.empty:
+                    results[ticker] = {"status": "no_data"}
                 else:
-                    df = df.dropna(subset=['Close'])
-                    if not df.empty:
-                        last_row = df.iloc[-1]
-                        close_val = float(last_row['Close'])
-                        
-                        change_pct = 0
-                        if len(df) >= 2:
-                            prev_close = float(df.iloc[-2]['Close'])
-                            change_pct = ((close_val - prev_close) / prev_close) * 100
-
-                        results[ticker] = {
-                            "date": last_row.name.strftime('%Y-%m-%d'),
-                            "close": round(close_val, 3),
-                            "variation_veille": round(change_pct, 2),
-                            "high": round(float(last_row['High']), 3),
-                            "low": round(float(last_row['Low']), 3),
-                            "volume": int(last_row['Volume']),
-                            "status": "success"
-                        }
-                    else:
-                        results[ticker] = {"status": "no_data"}
+                    results[ticker] = process_ticker_logic(ticker, df, t_obj)
             except Exception as e:
                 results[ticker] = {"status": "error", "message": str(e)}
 
         # ---------------------------------------------------------
-        # MODE MULTI (>1 ticker) : On utilise yf.download
+        # MODE MULTI (>1 ticker) : Utilisation de yf.download
         # ---------------------------------------------------------
         else:
-            data = yf.download(ticker_list, period="2d", group_by='ticker', threads=True, prepost=False)
+            data = yf.download(ticker_list, period="5d", group_by='ticker', threads=True)
             for ticker in ticker_list:
                 try:
-                    df = data[ticker]
-                    
-                    if df.empty or 'Close' not in df.columns:
-                        results[ticker] = {"status": "no_data", "message": "Aucune donnée renvoyée"}
+                    df = data[ticker].dropna(subset=['Close'])
+                    if df.empty:
+                        results[ticker] = {"status": "no_data"}
                         continue
                     
-                    df = df.dropna(subset=['Close'])
-                    if not df.empty:
-                        last_row = df.iloc[-1]
-                        close_val = float(last_row['Close'])
-                        
-                        change_pct = 0
-                        if len(df) >= 2:
-                            prev_close = float(df.iloc[-2]['Close'])
-                            change_pct = ((close_val - prev_close) / prev_close) * 100
-
-                        results[ticker] = {
-                            "date": last_row.name.strftime('%Y-%m-%d'),
-                            "close": round(close_val, 3),
-                            "variation_veille": round(change_pct, 2),
-                            "high": round(float(last_row['High']), 3),
-                            "low": round(float(last_row['Low']), 3),
-                            "volume": int(last_row['Volume']),
-                            "status": "success"
-                        }
-                    else:
-                        results[ticker] = {"status": "no_data"}
+                    # On passe l'objet Ticker pour le "Double Check" si besoin
+                    results[ticker] = process_ticker_logic(ticker, df, yf.Ticker(ticker))
                 except Exception as e:
                     results[ticker] = {"status": "error", "message": str(e)}
 
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+def process_ticker_logic(ticker, df, ticker_obj):
+    """ Logique métier mutualisée pour le calcul et la sécurité """
+    df = df.dropna(subset=['Close'])
+    if len(df) < 2:
+        return {"status": "insufficient_data"}
+
+    last_row = df.iloc[-1]
+    prev_row = df.iloc[-2]
+    
+    close_val = float(last_row['Close'])
+    prev_close = float(prev_row['Close'])
+    change_pct = ((close_val - prev_close) / prev_close) * 100
+    source = "Historical"
+
+    # 1. SÉCURITÉ ANTI-STALE (Double Check)
+    # Si le cours est identique à la veille alors qu'il y a du volume
+    if close_val == prev_close and last_row['Volume'] > 0:
+        df_live = ticker_obj.history(period="1d", interval="1m")
+        if not df_live.empty:
+            live_price = float(df_live.iloc[-1]['Close'])
+            if live_price != close_val:
+                close_val = live_price
+                change_pct = ((close_val - prev_close) / prev_close) * 100
+                source = "Live_1m_Force"
+
+    # 2. FILTRE COHÉRENCE 10% (Règle du 06/02/2026)
+    status = "success"
+    message = ""
+    if abs(change_pct) > 10:
+        status = "warning_coherence"
+        message = "Variation > 10% à vérifier sur Euronext"
+    elif source == "Historical" and close_val == prev_close:
+        status = "stale_data"
+        message = "Donnée identique à la veille (non rafraîchie)"
+
+    return {
+        "date": last_row.name.strftime('%Y-%m-%d'),
+        "close": round(close_val, 3),
+        "variation_veille": round(change_pct, 2),
+        "high": round(float(last_row['High']), 3),
+        "low": round(float(last_row['Low']), 3),
+        "volume": int(last_row['Volume']),
+        "status": status,
+        "message": message,
+        "source_type": source
+    }
 
 @app.route('/get_historic_data', methods=['GET'])
 def get_historic_data():
