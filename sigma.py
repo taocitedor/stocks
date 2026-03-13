@@ -115,12 +115,11 @@ def alpha_engine_v3():
     active_trade = None
 
     # ==========================================
-    # 🔍 BLOC DE DEBUGGAGE
+    # 🔍 BLOC DE DEBUGGAGE (CORRIGÉ PANDAS 2.0+)
     # ==========================================
     # Modifie cette date avec celle où tu attendais ton achat
     cible = pd.to_datetime('2024-05-31') 
     
-    # On compile toutes tes conditions dans un tableau lisible
     df_debug = pd.DataFrame({
         'Close': base_ora['Close'].round(2),
         'Mkt_OK (Filtre SMA)': mkt_ok,
@@ -133,14 +132,15 @@ def alpha_engine_v3():
         'SCORE FINAL': score
     })
     
-    # On affiche la date cible +/- 3 jours pour voir le contexte
     try:
-        idx_loc = df_debug.index.get_loc(cible, method='nearest')
+        # Nouvelle méthode compatible toutes versions Pandas
+        idx_loc = abs(df_debug.index - cible).argmin()
+        
         print(f"\n--- 🕵️ ANALYSE DE LA ZONE DU {cible.strftime('%Y-%m-%d')} ---")
         print(df_debug.iloc[idx_loc-3 : idx_loc+4].to_string())
         print("--------------------------------------------------\n")
-    except KeyError:
-        print(f"Date {cible} introuvable dans l'index.")
+    except Exception as e:
+        print(f"Erreur lors de l'affichage : {e}")
     # ==========================================
     
     for date in base_ora.index[ALPHA_CFG['SMA_P']:]:
