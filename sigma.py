@@ -54,13 +54,13 @@ def alpha_engine_v3():
     client = bigquery.Client(project=ALPHA_CFG['PROJECT'])
     query = f"""
         SELECT * FROM `{ALPHA_CFG['DB_SET']}.{ALPHA_CFG['TBL']}` 
-        WHERE Ticker IN ('ORA.PA','{ALPHA_CFG['IDX']}') 
+        WHERE Ticker IN ('EN.PA','{ALPHA_CFG['IDX']}') 
         ORDER BY Date ASC
     """
     raw_df = client.query(query).to_dataframe()
     raw_df['Date'] = pd.to_datetime(raw_df['Date']).dt.tz_localize(None)
     
-    base_ora = raw_df[raw_df['Ticker']=='ORA.PA'].set_index('Date').copy()
+    base_ora = raw_df[raw_df['Ticker']=='EN.PA'].set_index('Date').copy()
     base_idx = raw_df[raw_df['Ticker']==ALPHA_CFG['IDX']].set_index('Date').copy()
     
     for df in [base_ora, base_idx]:
@@ -208,7 +208,7 @@ def alpha_engine_v3():
     # 6. FORMATAGE JSON
     df_ledger = pd.DataFrame(ledger)
     res = {
-        "metadata": {"system": "Alpha Engine v3.2", "ticker": "ORA.PA"},
+        "metadata": {"system": "Alpha Engine v3.2", "ticker": "EN.PA"},
         "performance": {
             "gain_total": float(df_ledger['Gain'].sum()) if not df_ledger.empty else 0.0,
             "nb_trades": int(len(df_ledger)),
