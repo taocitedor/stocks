@@ -140,7 +140,7 @@ def alpha_engine_v3():
     active_trade = None
 
     # ====== BLOC DE DEBUG (facultatif) =======================================
-    cible = pd.to_datetime('2024-05-31')
+    cible = pd.to_datetime('2025-07-30')
     df_debug = pd.DataFrame({
         'Close': base_ora['Close'].round(2),
         'Mkt_OK (Filtre SMA)': mkt_ok,
