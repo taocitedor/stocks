@@ -97,82 +97,47 @@ def get_batch_data():
     results = {}
 
     try:
-        # On utilise yf.download pour TOUT (Solo ou Multi) avec group_by='ticker'
-        # Cela garantit une structure de données identique.
-        data = yf.download(ticker_list, period="5d", group_by='ticker', threads=True, auto_adjust=False)
-        
-        for ticker in ticker_list:
+        # ---------------------------------------------------------
+        # MODE SOLO (1 ticker) : Sécurisé via yf.Ticker
+        # ---------------------------------------------------------
+        if len(ticker_list) == 1:
+            ticker = ticker_list[0]
             try:
-                # Extraction du DataFrame selon que c'est du multi-index ou non
-                if len(ticker_list) > 1:
-                    df = data[ticker].dropna(subset=['Close'])
-                else:
-                    df = data.dropna(subset=['Close'])
-
-                if df.empty or len(df) < 2:
+                t_obj = yf.Ticker(ticker)
+                # auto_adjust=False pour rester cohérent avec le gold standard
+                df = t_obj.history(period="5d", auto_adjust=False) 
+                
+                if df.empty or len(df.dropna(subset=['Close'])) < 2:
                     results[ticker] = {"status": "no_data", "message": "Pas assez d'historique (min 2j)"}
-                    continue
-                
-                # Appel de la logique de calcul sécurisée
-                results[ticker] = process_ticker_logic(ticker, df)
-                
+                else:
+                    results[ticker] = process_ticker_logic(ticker, df)
             except Exception as e:
                 results[ticker] = {"status": "error", "message": str(e)}
+
+        # ---------------------------------------------------------
+        # MODE MULTI (>1 ticker) : Sécurisé via yf.download
+        # ---------------------------------------------------------
+        else:
+            data = yf.download(ticker_list, period="5d", group_by='ticker', threads=True, auto_adjust=False)
+            
+            for ticker in ticker_list:
+                try:
+                    # Dans un multi-téléchargement, on isole les colonnes du ticker
+                    df = data[ticker].dropna(subset=['Close'])
+                    
+                    if df.empty or len(df) < 2:
+                        results[ticker] = {"status": "no_data", "message": "Pas assez d'historique (min 2j)"}
+                        continue
+                    
+                    results[ticker] = process_ticker_logic(ticker, df)
+                    
+                except Exception as e:
+                    results[ticker] = {"status": "error", "message": str(e)}
 
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-def process_ticker_logic(ticker, df):
-    # 1. Identification des lignes
-    last_row = df.iloc[-1]
-    prev_row = df.iloc[-2]
-    
-    # 2. Récupération des dates pour vérifier le D-1 vs D-2
-    date_cloture = last_row.name.strftime('%Y-%m-%d')
-    date_veille = prev_row.name.strftime('%Y-%m-%d')
-    
-    close_val = float(last_row['Close'])
-    prev_close = float(prev_row['Close'])
-    
-    # 3. Calcul de la variation
-    change_pct = ((close_val - prev_close) / prev_close) * 100
-    source = "Historical"
-
-    # 4. Sécurité Anti-Stale (Si le marché est ouvert mais que le prix n'a pas bougé)
-    # Note : On ne déclenche le Live que si Volume > 0 (marché ouvert)
-    if close_val == prev_close and last_row['Volume'] > 0:
-        t_obj = yf.Ticker(ticker)
-        df_live = t_obj.history(period="1d", interval="1m")
-        if not df_live.empty:
-            live_price = float(df_live.iloc[-1]['Close'])
-            if live_price != close_val:
-                close_val = live_price
-                change_pct = ((close_val - prev_close) / prev_close) * 100
-                source = "Live_1m_Force"
-
-    # 5. Gestion des statuts (Filtre 10% devient un WARNING, pas une erreur)
-    status = "success"
-    message = ""
-    if abs(change_pct) > 10:
-        status = "warning_coherence"
-        message = f"Variation forte ({round(change_pct, 2)}%) détectée."
-    elif close_val == prev_close:
-        status = "stale_data"
-        message = "Prix identique à la veille."
-
-    return {
-        "date": date_cloture,
-        "date_comparaison": date_veille, # Pour vérifier si on compare bien aujourd'hui vs hier
-        "close": round(close_val, 3),
-        "variation_veille": round(change_pct, 2),
-        "high": round(float(last_row['High']), 3),
-        "low": round(float(last_row['Low']), 3),
-        "volume": int(last_row['Volume']),
-        "status": status,
-        "message": message,
-        "source_type": source
-    }
+        
     
 @app.route('/get_historic_data', methods=['GET'])
 def get_historic_data():
