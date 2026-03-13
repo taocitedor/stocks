@@ -68,30 +68,39 @@ def alpha_engine_v3():
     is_sqz = (2 * std20 < 1.5 * atr_sqz).fillna(False)
 
     # --- ALIGNEMENT STRUCTURE GAS (Séquence HH + HL) ---
+    
     def get_pivots_gas_style(series, w=3):
-        p_h = (series == series.rolling(2*w + 1, center=True).max()).shift(w).fillna(False)
-        p_l = (series == series.rolling(2*w + 1, center=True).min()).shift(w).fillna(False)
+        win = 2 * w + 1
+        # centre la fenêtre sur la bougie candidate ; le shift(w) "retarde" le pivot
+        p_h = (series == series.rolling(win, center=True).max()).shift(w).fillna(False)
+        p_l = (series == series.rolling(win, center=True).min()).shift(w).fillna(False)
         return p_h.astype(bool), p_l.astype(bool)
-
-    is_pivot_h, is_pivot_l = get_pivots_gas_style(base_ora['High']), get_pivots_gas_style(base_ora['Low'])
-
-    # On extrait les valeurs des pivots uniquement là où ils sont détectés
+    
+    # ⚠️ On récupère explicitement la bonne composante de sortie
+    is_pivot_h, _ = get_pivots_gas_style(base_ora['High'])
+    _, is_pivot_l = get_pivots_gas_style(base_ora['Low'])
+    
+    # Masques bien de type Series (mêmes index que base_ora)
+    assert isinstance(is_pivot_h, pd.Series) and isinstance(is_pivot_l, pd.Series)
+    assert is_pivot_h.index.equals(base_ora.index) and is_pivot_l.index.equals(base_ora.index)
+    
+    # Extraction des valeurs aux pivots
     p_h_vals = base_ora['High'].where(is_pivot_h)
     p_l_vals = base_ora['Low'].where(is_pivot_l)
-
-    # h1 = le dernier sommet connu, h2 = le sommet juste avant celui-là
-    # Correction cruciale : on dropna pour décaler les pivots entre eux, pas les lignes du calendrier
+    
+    # h1: dernier sommet confirmé ; h2: sommet précédent
     last_h1 = p_h_vals.ffill()
     last_h2 = p_h_vals.dropna().shift(1).reindex(base_ora.index).ffill()
     
+    # l1: dernier creux confirmé ; l2: creux précédent
     last_l1 = p_l_vals.ffill()
     last_l2 = p_l_vals.dropna().shift(1).reindex(base_ora.index).ffill()
-
-    # On s'assure que struct_ok a exactement le même index et la même forme que base_ora
-    is_hh = (last_h1 > last_h2)
-    is_hl = (last_l1 > last_l2)
     
+    # Structure HH + HL
+    is_hh = last_h1 > last_h2
+    is_hl = last_l1 > last_l2
     struct_ok = (is_hh & is_hl).fillna(False)
+
 
     # 3. CALCUL DU SCORE
     s_val = pd.Series(0, index=base_ora.index)
