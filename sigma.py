@@ -45,8 +45,8 @@ def alpha_engine_v3():
 
     # 2. CALCULS INDICATEURS VECTORISÉS
     # Force Relative
-    ora_perf = base_ora['Close'].pct_change(62)
-    idx_perf = base_idx['Close'].reindex(base_ora.index).pct_change(62)
+    ora_perf = base_ora['Close'].pct_change(63)
+    idx_perf = base_idx['Close'].reindex(base_ora.index).pct_change(63)
     rs_line = (ora_perf - idx_perf) * 100
 
     # RSI Gold 
@@ -68,27 +68,30 @@ def alpha_engine_v3():
     is_sqz = (2 * std20 < 1.5 * atr_sqz).fillna(False)
 
     # --- ALIGNEMENT STRUCTURE GAS (Séquence HH + HL) ---
-    # Détection des pivots sans center=True pour éviter le décalage de fenêtre
     def get_pivots_gas_style(series, w=3):
-        # On simule le comportement GAS : un point est un pivot si max/min sur [i-w : i+w]
-        # On utilise une fenêtre de 7 (2*w + 1) et on décale de 3 pour simuler la latence de confirmation
         p_h = (series == series.rolling(2*w + 1, center=True).max()).shift(w).fillna(False)
         p_l = (series == series.rolling(2*w + 1, center=True).min()).shift(w).fillna(False)
-        return p_h, p_l
+        return p_h.astype(bool), p_l.astype(bool)
 
     is_pivot_h, is_pivot_l = get_pivots_gas_style(base_ora['High']), get_pivots_gas_style(base_ora['Low'])
 
-    # Extraction des prix aux moments des pivots
-    # ffill() permet de garder en mémoire le "dernier pivot connu" à chaque ligne T
-    last_h1 = base_ora['High'].where(is_pivot_h).ffill()
-    last_h2 = base_ora['High'].where(is_pivot_h).shift(1).ffill() # Pivot précédent
-    
-    last_l1 = base_ora['Low'].where(is_pivot_l).ffill()
-    last_l2 = base_ora['Low'].where(is_pivot_l).shift(1).ffill() # Pivot précédent
+    # On extrait les valeurs des pivots uniquement là où ils sont détectés
+    p_h_vals = base_ora['High'].where(is_pivot_h)
+    p_l_vals = base_ora['Low'].where(is_pivot_l)
 
-    # En GAS : HH = Sommet actuel > Sommet précédent ET HL = Creux actuel > Creux précédent
-    # On ajoute une fenêtre de "fraîcheur" (15 jours) comme dans ton slice(-15) sur GAS
-    struct_ok = (last_h1 > last_h2) & (last_l1 > last_l2)
+    # h1 = le dernier sommet connu, h2 = le sommet juste avant celui-là
+    # Correction cruciale : on dropna pour décaler les pivots entre eux, pas les lignes du calendrier
+    last_h1 = p_h_vals.ffill()
+    last_h2 = p_h_vals.dropna().shift(1).reindex(base_ora.index).ffill()
+    
+    last_l1 = p_l_vals.ffill()
+    last_l2 = p_l_vals.dropna().shift(1).reindex(base_ora.index).ffill()
+
+    # On s'assure que struct_ok a exactement le même index et la même forme que base_ora
+    is_hh = (last_h1 > last_h2)
+    is_hl = (last_l1 > last_l2)
+    
+    struct_ok = (is_hh & is_hl).fillna(False)
 
     # 3. CALCUL DU SCORE
     s_val = pd.Series(0, index=base_ora.index)
