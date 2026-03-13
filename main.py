@@ -104,11 +104,14 @@ def get_batch_data():
             ticker = ticker_list[0]
             try:
                 t_obj = yf.Ticker(ticker)
-                # auto_adjust=False pour garantir l'alignement avec les cours bruts Euronext
-                df = t_obj.history(period="5d", auto_adjust=False) 
+                # On tente 5j pour avoir la variation, sinon on se rabat sur 1j
+                df = t_obj.history(period="5d", auto_adjust=False)
                 
-                if df.empty or len(df.dropna(subset=['Close'])) < 2:
-                    results[ticker] = {"status": "no_data", "message": "Pas assez d'historique (min 2j)"}
+                if df.empty:
+                    df = t_obj.history(period="1d", auto_adjust=False)
+
+                if df.empty:
+                    results[ticker] = {"status": "no_data", "message": "Aucune donnée trouvée"}
                 else:
                     results[ticker] = process_ticker_logic(ticker, df, t_obj)
             except Exception as e:
@@ -124,11 +127,15 @@ def get_batch_data():
                 try:
                     df = data[ticker].dropna(subset=['Close'])
                     
-                    if df.empty or len(df) < 2:
-                        results[ticker] = {"status": "no_data", "message": "Pas assez d'historique (min 2j)"}
+                    # Si vide dans le download groupé, on peut tenter un rattrapage solo
+                    if df.empty:
+                        t_obj = yf.Ticker(ticker)
+                        df = t_obj.history(period="1d", auto_adjust=False)
+                    
+                    if df.empty:
+                        results[ticker] = {"status": "no_data", "message": "Pas de données disponibles"}
                         continue
                     
-                    # On recrée l'objet Ticker uniquement pour le Double Check Live
                     t_obj = yf.Ticker(ticker)
                     results[ticker] = process_ticker_logic(ticker, df, t_obj)
                     
@@ -143,40 +150,50 @@ def get_batch_data():
 def process_ticker_logic(ticker, df, ticker_obj):
     """ Logique métier mutualisée pour le calcul et la sécurité """
     df = df.dropna(subset=['Close'])
-    if len(df) < 2:
+    if df.empty:
         return {"status": "insufficient_data"}
 
     last_row = df.iloc[-1]
-    prev_row = df.iloc[-2]
-    
-    # Récupération des dates pour valider le D-1 vs D-2
     date_cloture = last_row.name.strftime('%Y-%m-%d')
-    date_veille = prev_row.name.strftime('%Y-%m-%d')
-    
     close_val = float(last_row['Close'])
-    prev_close = float(prev_row['Close'])
-    change_pct = ((close_val - prev_close) / prev_close) * 100
-    source = "Historical"
-
-    # 1. SÉCURITÉ ANTI-STALE (Double Check)
-    if close_val == prev_close and last_row['Volume'] > 0:
-        df_live = ticker_obj.history(period="1d", interval="1m")
-        if not df_live.empty:
-            live_price = float(df_live.iloc[-1]['Close'])
-            if live_price != close_val:
-                close_val = live_price
-                change_pct = ((close_val - prev_close) / prev_close) * 100
-                source = "Live_1m_Force"
-
-    # 2. FILTRE COHÉRENCE 10%
+    
+    # Valeurs par défaut pour le mode "Single Day"
+    date_veille = "N/A"
+    change_pct = 0.0
     status = "success"
     message = ""
-    if abs(change_pct) > 10:
-        status = "warning_coherence"
-        message = f"Variation > 10% ({round(change_pct, 2)}%) à vérifier sur Euronext"
-    elif source == "Historical" and close_val == prev_close:
-        status = "stale_data"
-        message = "Donnée identique à la veille (non rafraîchie)"
+    source = "Historical"
+
+    # 1. CALCUL SI HISTORIQUE DISPONIBLE
+    if len(df) >= 2:
+        prev_row = df.iloc[-2]
+        date_veille = prev_row.name.strftime('%Y-%m-%d')
+        prev_close = float(prev_row['Close'])
+        change_pct = ((close_val - prev_close) / prev_close) * 100
+
+        # SÉCURITÉ ANTI-STALE (Double Check)
+        if close_val == prev_close and last_row['Volume'] > 0:
+            df_live = ticker_obj.history(period="1d", interval="1m")
+            if not df_live.empty:
+                live_price = float(df_live.iloc[-1]['Close'])
+                if live_price != close_val:
+                    close_val = live_price
+                    change_pct = ((close_val - prev_close) / prev_close) * 100
+                    source = "Live_1m_Force"
+    else:
+        # MODE RÉCUPÉRATION (Ex: ETSZ.DE)
+        status = "partial_success"
+        message = "Variation indisponible (1 seul jour de data)"
+        source = "Single_Day_Recovery"
+
+    # 2. FILTRE COHÉRENCE 10% (Seulement si on a une variation calculable)
+    if status == "success":
+        if abs(change_pct) > 10:
+            status = "warning_coherence"
+            message = f"Variation > 10% ({round(change_pct, 2)}%) à vérifier sur Euronext"
+        elif source == "Historical" and close_val == prev_close:
+            status = "stale_data"
+            message = "Donnée identique à la veille (non rafraîchie)"
 
     return {
         "date": date_cloture,
