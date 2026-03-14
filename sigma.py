@@ -1,3 +1,4 @@
+# ==== START sigma.py
 import json
 import numpy as np
 import pandas as pd
@@ -30,6 +31,13 @@ ALPHA_CFG = {
 
 
 def gas_rs_series(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
+    """
+    RS alignée GAS :
+      - besoin d'au moins 63 barres côté titre
+      - stock_perf = close[t] vs close[t-62]
+      - pour l'indice : dernier close <= date du titre, puis 62 barres plus tôt
+      - RS = (stock_perf - idx_perf) * 100
+    """
     stock_close = pd.to_numeric(stock_close, errors='coerce').sort_index()
     idx_close = pd.to_numeric(idx_close, errors='coerce').sort_index()
 
@@ -57,12 +65,8 @@ def gas_rs_series(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
         i_prev = i_vals[pos - 62]
 
         if (
-            np.isnan(s_curr)
-            or np.isnan(s_prev)
-            or s_prev == 0
-            or np.isnan(i_curr)
-            or np.isnan(i_prev)
-            or i_prev == 0
+            np.isnan(s_curr) or np.isnan(s_prev) or s_prev == 0 or
+            np.isnan(i_curr) or np.isnan(i_prev) or i_prev == 0
         ):
             out[i] = 0.0
             continue
@@ -75,6 +79,9 @@ def gas_rs_series(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
 
 
 def gas_rsi_series(close: pd.Series, p: int = 14) -> pd.Series:
+    """
+    RSI façon GAS (somme gains/pertes sur p barres ; pertes==0 -> 100)
+    """
     close = pd.to_numeric(close, errors='coerce')
     diff = close.diff()
     gains = diff.clip(lower=0).rolling(p, min_periods=p).sum()
@@ -91,8 +98,13 @@ def gas_rsi_series(close: pd.Series, p: int = 14) -> pd.Series:
 
 
 def gas_pivots_events(df: pd.DataFrame, w: int = 3):
+    """
+    Pivots stricts comme GAS :
+      - H si aucun voisin (i-w..i+w, hors i) n'a high >= high[i]
+      - L si aucun voisin (i-w..i+w, hors i) n'a low  <= low[i]
+    """
     highs = pd.to_numeric(df['High'], errors='coerce').to_numpy(dtype=float)
-    lows = pd.to_numeric(df['Low'], errors='coerce').to_numpy(dtype=float)
+    lows  = pd.to_numeric(df['Low'],  errors='coerce').to_numpy(dtype=float)
 
     pivots = []
     n = len(df)
@@ -100,13 +112,12 @@ def gas_pivots_events(df: pd.DataFrame, w: int = 3):
     for i in range(w, n - w):
         is_h = True
         is_l = True
-
         for j in range(i - w, i + w + 1):
             if j == i:
                 continue
             if highs[j] >= highs[i]:
                 is_h = False
-            if lows[j] <= lows[i]:
+            if lows[j]  <= lows[i]:
                 is_l = False
             if not is_h and not is_l:
                 break
@@ -120,6 +131,12 @@ def gas_pivots_events(df: pd.DataFrame, w: int = 3):
 
 
 def gas_structure_series(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
+    """
+    Structure comme GAS :
+      - un pivot détecté à k devient visible à k+w
+      - à chaque date i, on prend les pivots visibles, on slice(-15)
+      - HH/LH sur les deux derniers H ; HL/LL sur les deux derniers L
+    """
     df = df.sort_index().copy()
     n = len(df)
     all_pivots = gas_pivots_events(df, w=w)
@@ -140,7 +157,7 @@ def gas_structure_series(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
 
         p15 = active_pivots[-last_pivots:]
         highs = [x for x in p15 if x['type'] == 'H']
-        lows = [x for x in p15 if x['type'] == 'L']
+        lows  = [x for x in p15 if x['type'] == 'L']
 
         if len(highs) < 2 or len(lows) < 2:
             struct_label[i] = 'ND'
@@ -162,26 +179,30 @@ def gas_structure_series(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
 
 
 def gas_squeeze_series(df: pd.DataFrame) -> pd.Series:
+    """
+    2*std20(population) < 1.5*avg20(high-low)
+    """
     close = pd.to_numeric(df['Close'], errors='coerce')
-    hl = pd.to_numeric(df['High'], errors='coerce') - pd.to_numeric(df['Low'], errors='coerce')
+    hl    = pd.to_numeric(df['High'],  errors='coerce') - pd.to_numeric(df['Low'], errors='coerce')
     std20 = close.rolling(20, min_periods=20).std(ddof=0)
-    atr20_hl = hl.rolling(20, min_periods=20).mean()
-    return ((2.0 * std20) < (1.5 * atr20_hl)).fillna(False)
+    atr20 = hl.rolling(20, min_periods=20).mean()
+    return ((2.0 * std20) < (1.5 * atr20)).fillna(False)
 
 
 def atr_true_range_series(df: pd.DataFrame) -> pd.Series:
     high = pd.to_numeric(df['High'], errors='coerce')
-    low = pd.to_numeric(df['Low'], errors='coerce')
+    low  = pd.to_numeric(df['Low'],  errors='coerce')
     prev_close = pd.to_numeric(df['Close'], errors='coerce').shift(1)
     tr = pd.concat([
         high - low,
         (high - prev_close).abs(),
-        (low - prev_close).abs(),
+        (low  - prev_close).abs(),
     ], axis=1).max(axis=1)
     return tr
 
 
 def alpha_engine_v3():
+    # 1) DATA
     client = bigquery.Client(project=ALPHA_CFG['PROJECT'])
     query = f"""
         SELECT *
@@ -189,12 +210,11 @@ def alpha_engine_v3():
         WHERE Ticker IN ('{ALPHA_CFG['STOCK']}', '{ALPHA_CFG['IDX']}')
         ORDER BY Date ASC
     """
-
     raw_df = client.query(query).to_dataframe()
     raw_df['Date'] = pd.to_datetime(raw_df['Date']).dt.tz_localize(None)
 
     base_stock = raw_df[raw_df['Ticker'] == ALPHA_CFG['STOCK']].set_index('Date').copy()
-    base_idx = raw_df[raw_df['Ticker'] == ALPHA_CFG['IDX']].set_index('Date').copy()
+    base_idx   = raw_df[raw_df['Ticker'] == ALPHA_CFG['IDX']].set_index('Date').copy()
 
     for df in [base_stock, base_idx]:
         for c in ['Close', 'High', 'Low', 'Volume']:
@@ -202,20 +222,20 @@ def alpha_engine_v3():
                 df[c] = pd.to_numeric(df[c], errors='coerce')
 
     base_stock = base_stock.sort_index()
-    base_idx = base_idx.sort_index()
+    base_idx   = base_idx.sort_index()
 
-    rs_line = gas_rs_series(base_stock['Close'], base_idx['Close'])
+    # 2) INDICATEURS
+    rs_line  = gas_rs_series(base_stock['Close'], base_idx['Close'])
     rsi_gold = gas_rsi_series(base_stock['Close'], p=14)
-    v_ratio = (base_stock['Volume'] / base_stock['Volume'].rolling(20, min_periods=20).mean()).fillna(0.0)
-    mm20 = base_stock['Close'].rolling(20, min_periods=20).mean()
+    v_ratio  = (base_stock['Volume'] / base_stock['Volume'].rolling(20, min_periods=20).mean()).fillna(0.0)
+    mm20     = base_stock['Close'].rolling(20, min_periods=20).mean()
     dist_mm20 = ((base_stock['Close'] - mm20).abs() / mm20).fillna(1.0)
-    is_sqz = gas_squeeze_series(base_stock)
+    is_sqz   = gas_squeeze_series(base_stock)
     struct_label, struct_ok = gas_structure_series(
-        base_stock,
-        w=ALPHA_CFG['PIVOT_W'],
-        last_pivots=ALPHA_CFG['STRUCT_LAST_PIVOTS'],
+        base_stock, w=ALPHA_CFG['PIVOT_W'], last_pivots=ALPHA_CFG['STRUCT_LAST_PIVOTS']
     )
 
+    # 3) SCORE
     s_val = pd.Series(0.0, index=base_stock.index)
     s_val += np.where((rsi_gold >= 50) & (rsi_gold <= 70), 15, 0)
     s_val += np.where(v_ratio > 1.5, 25, np.where(v_ratio > 1.1, 12.5, 0))
@@ -224,19 +244,18 @@ def alpha_engine_v3():
     s_val += np.where(is_sqz, 10, 0)
     score = pd.Series(np.where(rs_line <= 0, 0, s_val), index=base_stock.index)
 
+    # 4) FILTRE MARCHÉ & ATR
     idx_close_on_stock_dates = base_idx['Close'].reindex(base_stock.index)
-    idx_sma = base_idx['Close'].rolling(ALPHA_CFG['SMA_P'], min_periods=ALPHA_CFG['SMA_P']).mean()
+    idx_sma  = base_idx['Close'].rolling(ALPHA_CFG['SMA_P'], min_periods=ALPHA_CFG['SMA_P']).mean()
     idx_sma_on_stock_dates = idx_sma.reindex(base_stock.index)
     idx_slope = ((idx_sma_on_stock_dates - idx_sma_on_stock_dates.shift(4)) / idx_sma_on_stock_dates.shift(4)).fillna(0.0)
-
-    if ALPHA_CFG['MKT_FILTER']:
-        mkt_ok = (idx_close_on_stock_dates > idx_sma_on_stock_dates).fillna(False)
-    else:
-        mkt_ok = pd.Series(True, index=base_stock.index)
+    mkt_ok = (idx_close_on_stock_dates > idx_sma_on_stock_dates).fillna(False) if ALPHA_CFG['MKT_FILTER'] else \
+             pd.Series(True, index=base_stock.index)
 
     tr = atr_true_range_series(base_stock)
     atr_vec = tr.rolling(ALPHA_CFG['ATR_P'], min_periods=ALPHA_CFG['ATR_P']).mean().shift(1).fillna(0.0)
 
+    # 5) DEBUG (sans try/except)
     cible = pd.to_datetime(ALPHA_CFG['DEBUG_DATE'])
     df_debug = pd.DataFrame({
         'Close': base_stock['Close'].round(2),
@@ -250,12 +269,12 @@ def alpha_engine_v3():
         'Structure (HH+HL)': struct_ok,
         'SCORE FINAL': score.round(2),
     })
-
     idx_loc = int(np.argmin(np.abs(df_debug.index - cible)))
-    print(f"\\n--- ANALYSE DE LA ZONE DU {cible.strftime('%Y-%m-%d')} ---")
+    print(f"\n--- ANALYSE DE LA ZONE DU {cible.strftime('%Y-%m-%d')} ---")
     print(df_debug.iloc[max(0, idx_loc - 3): idx_loc + 4].to_string())
-    print("--------------------------------------------------\\n")
+    print("--------------------------------------------------\n")
 
+    # 6) MOTEUR TRADING
     ledger = []
     active_trade = None
 
@@ -264,7 +283,7 @@ def alpha_engine_v3():
 
         if active_trade is not None:
             h_perf = (row['High'] - active_trade['e_px']) / active_trade['e_px']
-            l_perf = (row['Low'] - active_trade['e_px']) / active_trade['e_px']
+            l_perf = (row['Low']  - active_trade['e_px']) / active_trade['e_px']
             be_triggered_this_bar = (not active_trade['be_hit']) and (h_perf >= active_trade['be_trig'])
 
             effective_sl = ALPHA_CFG['FEES'] if active_trade['be_hit'] else -ALPHA_CFG['STOP_L']
@@ -288,19 +307,16 @@ def alpha_engine_v3():
             continue
 
         if bool(mkt_ok.loc[date]) and float(score.loc[date]) >= ALPHA_CFG['MIN_SCORE']:
-            if pd.notna(row['Close']) and row['Close'] != 0:
-                vol_pct = float(atr_vec.loc[date] / row['Close'])
-            else:
-                vol_pct = 0.0
-
+            vol_pct = float(atr_vec.loc[date] / row['Close']) if pd.notna(row['Close']) and row['Close'] != 0 else 0.0
             active_trade = {
                 'date': date,
-                'e_px': float(row['Close']),
+                'e_px': float(row['Close']),  # pour exécution next-bar open, remplace ici si tu as 'Open'
                 'tp_val': ALPHA_CFG['TP_TREND'] if idx_slope.loc[date] >= ALPHA_CFG['SLOPE_TRESH'] else ALPHA_CFG['TP_RANGE'],
                 'be_trig': ALPHA_CFG['BE_F'] if (idx_slope.loc[date] >= 0.004 and vol_pct < ALPHA_CFG['VOL_LIM']) else ALPHA_CFG['BE_S'],
                 'be_hit': False,
             }
 
+    # 7) SORTIE
     df_ledger = pd.DataFrame(ledger)
     return {
         'metadata': {
@@ -319,3 +335,4 @@ def alpha_engine_v3():
 if __name__ == '__main__':
     results = alpha_engine_v3()
     print(json.dumps(results, indent=2, ensure_ascii=False))
+# ==== END sigma.py
