@@ -8,24 +8,34 @@ ALPHA4_CFG = {
     'PROJECT': 'project-16c606d0-6527-4644-907',
     'DB_SET': 'Trading',
     'TBL': 'CC_Historique_Cours',
-    'IDX': '^FCHI',          # Indice de marché (CAC 40)
-    'MKT_FILTER': True,      # Filtre marché : close > SMA100 CAC
-    'SMA_P': 100,            # SMA marché
-    'MIN_SCORE': 86,         # Seuil de score
-    'LOOKBACK': 63,          # Fenêtre RS (=> current vs current-62)
-    'TP_TREND': 0.13,
-    'TP_RANGE': 0.10,
-    'SLOPE_TRESH': -0.003,   # seuil pente SMA marché
+    'IDX': '^FCHI',
+    'MKT_FILTER': True,
+    'SMA_P': 100,
+    'MIN_SCORE': 86,
+    'LOOKBACK': 63,
+    
+    # --- Paramètres TP (Dynamiques) ---
+    'TP_TREND': 0.13,        # TP standard en tendance
+    'TP_RANGE': 0.10,        # TP si marché mou/baissier
+    'TP_BOOST': 0.02,        # Bonus TP si fort momentum (ex: 0.13 + 0.02 = 15%)
+    'SLOPE_TRESH': -0.003,   # Seuil pente SMA marché
+    'SLOPE_STRONG': 0.005,   # Seuil pour déclencher le "Boost" de performance
+    
+    # --- Paramètres BE (Adaptatifs) ---
+    'BE_F': 0.06,            # BE fast (marché propre)
+    'BE_S': 0.0495,          # BE slow (marché volatil)
+    'BE_DELAY': 3,           # Nombre de barres minimum avant d'autoriser le BE (évite le bruit)
+    'VOL_LIM': 0.025,        # Limite volatilité pour passer de BE_F à BE_S
+    
+    # --- Gestion Risque & Frais ---
     'ATR_P': 50,
-    'BE_F': 0.06,            # BE fast
-    'BE_S': 0.0495,          # BE slow
-    'VOL_LIM': 0.025,        # limite vol pour BE fast
-    'STOP_L': 0.10,
-    'FEES': 0.0056,
+    'STOP_L': 0.10,          # Stop Loss initial
+    'FEES': 0.0056,          # Frais (appliqués à l'entrée et à la sortie)
     'SIZE': 4000,
+    
+    # --- Structure & Pivots ---
     'PIVOT_W': 3,
     'STRUCT_LAST_PIVOTS': 15,
-    # Optionnel: restreindre l’univers, ex. ['EN.PA','ORA.PA'] ; None => tous
     'UNIVERSE': None,
 }
 
@@ -208,10 +218,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                    cfg: dict,
                    idx_sma_on_stock_dates: pd.Series,
                    idx_slope_on_stock_dates: pd.Series):
-    """
-    Exécute le moteur (score/entrées/BE/TP/SL) pour un ticker donné.
-    Retourne: stats, ledger(trades)
-    """
+    
     stock_df = stock_df.sort_index().copy()
 
     # Indicateurs
@@ -232,46 +239,44 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     s_val += np.where(sqz_flag, 10, 0)
     score = pd.Series(np.where(rs_line <= 0, 0, s_val), index=stock_df.index)
 
-    # Filtre marché & ATR
     idx_close_on_stock_dates = idx_close.reindex(stock_df.index)
-    if cfg['MKT_FILTER']:
-        mkt_ok = (idx_close_on_stock_dates > idx_sma_on_stock_dates.reindex(stock_df.index)).fillna(False)
-    else:
-        mkt_ok = pd.Series(True, index=stock_df.index)
+    mkt_ok = (idx_close_on_stock_dates > idx_sma_on_stock_dates.reindex(stock_df.index)).fillna(False) if cfg['MKT_FILTER'] else pd.Series(True, index=stock_df.index)
 
     tr = v4_true_range(stock_df)
     atr_vec = tr.rolling(cfg['ATR_P'], min_periods=cfg['ATR_P']).mean().shift(1).fillna(0.0)
 
-    # Moteur trading
     ledger = []
     active_trade = None
-    start_i = cfg['SMA_P']  # on attend au moins SMA_P barres
+    start_i = cfg['SMA_P']
 
-    for date in stock_df.index[start_i:]:
+    for i, date in enumerate(stock_df.index[start_i:]):
         row = stock_df.loc[date]
 
         if active_trade is not None:
+            active_trade['bars_held'] += 1
             h_perf = (row['High'] - active_trade['e_px']) / active_trade['e_px']
             l_perf = (row['Low']  - active_trade['e_px']) / active_trade['e_px']
 
-            # BE constaté sur la barre, appliqué seulement après l'éval TP/SL
-            be_triggered_this_bar = (not active_trade['be_hit']) and (h_perf >= active_trade['be_trig'])
+            # Logique BE avec DELAY (Protection contre le retest)
+            be_eligible = active_trade['bars_held'] >= cfg['BE_DELAY']
+            be_triggered_this_bar = (not active_trade['be_hit']) and (h_perf >= active_trade['be_trig']) and be_eligible
 
             effective_sl = cfg['FEES'] if active_trade['be_hit'] else -cfg['STOP_L']
             hit_tp = (h_perf >= active_trade['tp_val'])
             hit_sl = (l_perf <= effective_sl)
 
             if hit_tp or hit_sl:
-                # Règle pessimiste: TP & SL touchés => on retient SL
                 raw_exit = effective_sl if hit_sl else active_trade['tp_val']
                 gain_cash = (raw_exit - cfg['FEES']) * cfg['SIZE']
                 trade_type = 'TP' if (hit_tp and not hit_sl) else ('BE' if active_trade['be_hit'] else 'SL')
+                
                 ledger.append({
                     'Ticker': stock_df.attrs.get('Ticker', 'NA'),
                     'Achat': active_trade['date'].strftime('%Y-%m-%d'),
                     'Vente': date.strftime('%Y-%m-%d'),
                     'Gain': float(gain_cash),
-                    'Type': trade_type
+                    'Type': trade_type,
+                    'Bars': active_trade['bars_held']
                 })
                 active_trade = None
             else:
@@ -279,34 +284,33 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     active_trade['be_hit'] = True
             continue
 
-        # Entrée
+        # --- Logique d'Entrée Adaptative ---
         if bool(mkt_ok.loc[date]) and float(score.loc[date]) >= cfg['MIN_SCORE']:
-            vol_pct = float(atr_vec.loc[date] / row['Close']) if pd.notna(row['Close']) and row['Close'] != 0 else 0.0
-            slope   = idx_slope_on_stock_dates.reindex(stock_df.index).loc[date]
-            tp_val  = cfg['TP_TREND'] if slope >= cfg['SLOPE_TRESH'] else cfg['TP_RANGE']
-            be_trig = cfg['BE_F'] if (slope >= 0.004 and vol_pct < cfg['VOL_LIM']) else cfg['BE_S']
+            slope = idx_slope_on_stock_dates.reindex(stock_df.index).loc[date]
+            vol_pct = float(atr_vec.loc[date] / row['Close']) if row['Close'] != 0 else 0.0
+            
+            # Détection du Moment (Tendance forte + Structure confirmée)
+            is_strong = (slope >= cfg['SLOPE_STRONG']) and struct_ok.loc[date]
+            
+            # Ajustement dynamique du TP
+            current_tp = cfg['TP_TREND']
+            if is_strong: current_tp += cfg['TP_BOOST']
+            if slope < cfg['SLOPE_TRESH']: current_tp = cfg['TP_RANGE']
+            
+            # Ajustement dynamique du BE
+            current_be_trig = cfg['BE_F'] if (slope >= 0.004 and vol_pct < cfg['VOL_LIM']) else cfg['BE_S']
 
             active_trade = {
                 'date': date,
-                'e_px': float(row['Close']),  # pour next-bar open: remplacer ici
-                'tp_val': tp_val,
-                'be_trig': be_trig,
-                'be_hit': False
+                'e_px': float(row['Close']),
+                'tp_val': current_tp,
+                'be_trig': current_be_trig,
+                'be_hit': False,
+                'bars_held': 0
             }
 
-    # Stats
     df_ledger = pd.DataFrame(ledger)
-    nb_trades = int(len(df_ledger))
-    gain_total = float(df_ledger['Gain'].sum()) if nb_trades else 0.0
-    win_rate = float((df_ledger['Gain'] > 0).mean()) if nb_trades else 0.0
-
-    stats = {
-        'nb_trades': nb_trades,
-        'gain_total': gain_total,
-        'win_rate': win_rate
-    }
-    return stats, ledger
-
+    return {'nb_trades': len(df_ledger), 'gain_total': df_ledger['Gain'].sum() if len(df_ledger) else 0.0, 'win_rate': (df_ledger['Gain'] > 0).mean() if len(df_ledger) else 0.0}, ledger
 
 # ===========================
 #  alpha4 : moteur multi-tickers — NOM DIFFERENT
