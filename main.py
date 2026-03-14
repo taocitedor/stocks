@@ -4,6 +4,7 @@ import yfinance as yf
 import os
 import backtest_test
 import sigma
+import sigma2
 
 app = Flask(__name__)
 
@@ -11,6 +12,14 @@ app = Flask(__name__)
 def run_test2():
     try:
         result = sigma.alpha_engine_v3()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"status":"error", "message": str(e)})
+
+@app.route("/run_test3", methods=["GET"])
+def run_test3():
+    try:
+        result = sigma2.alpha4()
         return jsonify(result)
     except Exception as e:
         return jsonify({"status":"error", "message": str(e)})
