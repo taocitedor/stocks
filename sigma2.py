@@ -221,7 +221,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     
     stock_df = stock_df.sort_index().copy()
 
-    # Indicateurs
+    # --- Indicateurs ---
     rs_line  = v4_rs_line(stock_df['Close'], idx_close)
     rsi      = v4_rsi(stock_df['Close'], p=14)
     vratio   = (stock_df['Volume'] / stock_df['Volume'].rolling(20, min_periods=20).mean()).fillna(0.0)
@@ -230,7 +230,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     sqz_flag = v4_squeeze_flag(stock_df)
     struct_label, struct_ok = v4_structure_labels(stock_df, w=cfg['PIVOT_W'], last_pivots=cfg['STRUCT_LAST_PIVOTS'])
 
-    # Score
+    # --- Score ---
     s_val = pd.Series(0.0, index=stock_df.index)
     s_val += np.where((rsi >= 50) & (rsi <= 70), 15, 0)
     s_val += np.where(vratio > 1.5, 25, np.where(vratio > 1.1, 12.5, 0))
@@ -249,6 +249,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     active_trade = None
     start_i = cfg['SMA_P']
 
+    # --- Boucle Simulation ---
     for i, date in enumerate(stock_df.index[start_i:]):
         row = stock_df.loc[date]
 
@@ -257,7 +258,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
             h_perf = (row['High'] - active_trade['e_px']) / active_trade['e_px']
             l_perf = (row['Low']  - active_trade['e_px']) / active_trade['e_px']
 
-            # Logique BE avec DELAY (Protection contre le retest)
             be_eligible = active_trade['bars_held'] >= cfg['BE_DELAY']
             be_triggered_this_bar = (not active_trade['be_hit']) and (h_perf >= active_trade['be_trig']) and be_eligible
 
@@ -284,135 +284,112 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     active_trade['be_hit'] = True
             continue
 
-        # --- Logique d'Entrée Adaptative ---
         if bool(mkt_ok.loc[date]) and float(score.loc[date]) >= cfg['MIN_SCORE']:
             slope = idx_slope_on_stock_dates.reindex(stock_df.index).loc[date]
             vol_pct = float(atr_vec.loc[date] / row['Close']) if row['Close'] != 0 else 0.0
             
-            # Détection du Moment (Tendance forte + Structure confirmée)
             is_strong = (slope >= cfg['SLOPE_STRONG']) and struct_ok.loc[date]
             
-            # Ajustement dynamique du TP
             current_tp = cfg['TP_TREND']
             if is_strong: current_tp += cfg['TP_BOOST']
             if slope < cfg['SLOPE_TRESH']: current_tp = cfg['TP_RANGE']
             
-            # Ajustement dynamique du BE
-            current_be_trig = cfg['BE_F'] if (slope >= 0.004 and vol_pct < cfg['VOL_LIM']) else cfg['BE_S']
+            # Détermination du type de BE
+            is_fast_be = (slope >= 0.004 and vol_pct < cfg['VOL_LIM'])
+            current_be_trig = cfg['BE_F'] if is_fast_be else cfg['BE_S']
 
             active_trade = {
                 'date': date,
                 'e_px': float(row['Close']),
                 'tp_val': current_tp,
                 'be_trig': current_be_trig,
+                'be_type': 'FAST' if is_fast_be else 'SLOW',
                 'be_hit': False,
                 'bars_held': 0
             }
 
-    df_ledger = pd.DataFrame(ledger)
-    return {'nb_trades': len(df_ledger), 'gain_total': df_ledger['Gain'].sum() if len(df_ledger) else 0.0, 'win_rate': (df_ledger['Gain'] > 0).mean() if len(df_ledger) else 0.0}, ledger
+    # --- Capture du Trade en cours ---
+    open_trade = None
+    if active_trade is not None:
+        last_close = float(stock_df.iloc[-1]['Close'])
+        perf_actuelle = (last_close - active_trade['e_px']) / active_trade['e_px']
+        
+        open_trade = {
+            'Ticker': stock_df.attrs.get('Ticker', 'NA'),
+            'Date_Achat': active_trade['date'].strftime('%Y-%m-%d'),
+            'Prix_Entree': round(active_trade['e_px'], 2),
+            'Prix_Actuel': round(last_close, 2),
+            'Perf_Latente_Pct': round(perf_actuelle * 100, 2),
+            'Objectif_TP_Pct': round(active_trade['tp_val'] * 100, 2),
+            'Seuil_BE_Pct': round(active_trade['be_trig'] * 100, 2),
+            'Configuration_BE': active_trade['be_type'],
+            'Statut_BE': 'SECURISE (BE)' if active_trade['be_hit'] else 'A RISQUE (SL)',
+            'Bars_Held': active_trade['bars_held']
+        }
 
+    df_ledger = pd.DataFrame(ledger)
+    stats = {
+        'nb_trades': len(df_ledger), 
+        'gain_total': df_ledger['Gain'].sum() if len(df_ledger) else 0.0, 
+        'win_rate': (df_ledger['Gain'] > 0).mean() if len(df_ledger) else 0.0
+    }
+    
+    return stats, ledger, open_trade
+                       
 # ===========================
 #  alpha4 : moteur multi-tickers — NOM DIFFERENT
 # ===========================
 def alpha4(cfg):
-    """
-    Exécute le moteur sur l'ensemble des tickers de CC_Historique_Cours (hors indice),
-    et renvoie un JSON avec :
-      - metadata (système, univers, index),
-      - portfolio (stats consolidées + stats par ticker),
-      - trades (tous les trades avec leur ticker).
-    """
-   # cfg = ALPHA4_CFG
-    
     client = bigquery.Client(project=cfg['PROJECT'])
-
-    query = f"""
-        SELECT *
-        FROM `{cfg['DB_SET']}.{cfg['TBL']}`
-        ORDER BY Date ASC
-    """
+    query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
     df = client.query(query).to_dataframe()
     df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
 
-    # Nettoyage
     for c in ['Close','High','Low','Volume']:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
+        if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Séparation indice / titres
     idx_ticker = cfg['IDX']
-    base_idx = df[df['Ticker'] == idx_ticker].copy()
-    if base_idx.empty:
-        raise RuntimeError(f"Indice {idx_ticker} introuvable dans la table.")
-
-    base_idx = base_idx.set_index('Date').sort_index()
+    base_idx = df[df['Ticker'] == idx_ticker].copy().set_index('Date').sort_index()
     idx_close = base_idx['Close']
-
-    # SMA marché + pente sur 4 barres (slope ~ GAS)
     idx_sma   = idx_close.rolling(cfg['SMA_P'], min_periods=cfg['SMA_P']).mean()
     idx_slope = ((idx_sma - idx_sma.shift(4)) / idx_sma.shift(4)).fillna(0)
 
-    # Univers de tickers
-    all_tickers = sorted(df['Ticker'].dropna().unique().tolist())
-    universe = [t for t in all_tickers if t != idx_ticker]
-    if cfg['UNIVERSE'] is not None:
-        allowed = set(cfg['UNIVERSE'])
-        universe = [t for t in universe if t in allowed]
+    universe = [t for t in sorted(df['Ticker'].dropna().unique()) if t != idx_ticker]
+    if cfg['UNIVERSE']: universe = [t for t in universe if t in cfg['UNIVERSE']]
 
     portfolio_trades = []
+    portfolio_open_positions = [] # <-- NOUVEAU
     per_ticker_stats = {}
 
     for t in universe:
-        d = df[df['Ticker'] == t].copy()
-        if d.empty:
-            per_ticker_stats[t] = {'nb_trades': 0, 'gain_total': 0.0, 'win_rate': 0.0}
-            continue
-
-        d = d.set_index('Date').sort_index()
+        d = df[df['Ticker'] == t].copy().set_index('Date').sort_index()
         d.attrs['Ticker'] = t
+        if len(d) < 100: continue
 
-        # ignore séries trop courtes (< 100 barres)
-        if len(d) < 100:
-            per_ticker_stats[t] = {'nb_trades': 0, 'gain_total': 0.0, 'win_rate': 0.0}
-            continue
-
-        # Projeter marché sur dates du titre
-        idx_sma_on_stock_dates   = idx_sma.reindex(d.index)
-        idx_slope_on_stock_dates = idx_slope.reindex(d.index)
-
-        stats, trades = _v4_run_ticker(
-            stock_df=d,
-            idx_close=idx_close,
-            cfg=cfg,
-            idx_sma_on_stock_dates=idx_sma_on_stock_dates,
-            idx_slope_on_stock_dates=idx_slope_on_stock_dates
+        # Appel du moteur modifié (renvoie 3 valeurs)
+        stats, trades, open_trade = _v4_run_ticker(
+            d, idx_close, cfg, 
+            idx_sma.reindex(d.index), 
+            idx_slope.reindex(d.index)
         )
+        
         per_ticker_stats[t] = stats
         portfolio_trades.extend(trades)
+        if open_trade:
+            portfolio_open_positions.append(open_trade)
 
-    # Consolidation portefeuille
     df_ledger = pd.DataFrame(portfolio_trades)
-    nb_trades  = int(len(df_ledger))
-    gain_total = float(df_ledger['Gain'].sum()) if nb_trades else 0.0
-    win_rate   = float((df_ledger['Gain'] > 0).mean()) if nb_trades else 0.0
-
-    res = {
-        'metadata': {
-            'system': 'Alpha Engine v4 (GAS-parity)',
-            'index': idx_ticker,
-            'universe_size': len(universe)
-        },
+    
+    return {
+        'metadata': {'system': 'Titanium v4.2', 'universe': len(universe)},
         'portfolio': {
-            'gain_total': gain_total,
-            'nb_trades': nb_trades,
-            'win_rate': win_rate,
+            'gain_total': float(df_ledger['Gain'].sum()) if len(df_ledger) else 0,
+            'win_rate': float((df_ledger['Gain'] > 0).mean()) if len(df_ledger) else 0,
             'by_ticker': per_ticker_stats
         },
-        'trades': df_ledger.to_dict(orient='records') if nb_trades else []
+        'open_positions': portfolio_open_positions, # <-- TES TRADES EN COURS
+        'trades': df_ledger.to_dict(orient='records')
     }
-    return res
-
 
 if __name__ == '__main__':
     out = alpha4()
