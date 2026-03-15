@@ -315,7 +315,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 # ===========================
 #  alpha4 : moteur multi-tickers — NOM DIFFERENT
 # ===========================
-def alpha4():
+def alpha4(cfg):
     """
     Exécute le moteur sur l'ensemble des tickers de CC_Historique_Cours (hors indice),
     et renvoie un JSON avec :
@@ -323,7 +323,8 @@ def alpha4():
       - portfolio (stats consolidées + stats par ticker),
       - trades (tous les trades avec leur ticker).
     """
-    cfg = ALPHA4_CFG
+   # cfg = ALPHA4_CFG
+    
     client = bigquery.Client(project=cfg['PROJECT'])
 
     query = f"""
