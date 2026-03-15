@@ -16,13 +16,24 @@ def run_test2():
     except Exception as e:
         return jsonify({"status":"error", "message": str(e)})
 
-@app.route("/run_test3", methods=["GET"])
+@app.route("/run_test3", methods=["GET", "POST"]) # POST est nécessaire pour GAS
 def run_test3():
     try:
-        result = sigma2.alpha4()
+        # 1. On part de ta configuration par défaut
+        config_finale = sigma2.ALPHA4_CFG.copy()
+        
+        # 2. On injecte les paramètres reçus de GAS s'ils existent
+        if request.is_json:
+            params_gas = request.get_json()
+            config_finale.update(params_gas)
+        
+        # 3. On exécute avec la config mise à jour
+        result = sigma2.alpha4(config_finale) # <--- On passe l'objet ici
+        
         return jsonify(result)
+        
     except Exception as e:
-        return jsonify({"status":"error", "message": str(e)})
+        return jsonify({"status": "error", "message": str(e)})
 
 
 @app.route("/run_test", methods=["GET"])
