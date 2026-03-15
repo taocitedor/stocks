@@ -36,7 +36,7 @@ ALPHA4_CFG = {
     # --- Structure & Pivots ---
     'PIVOT_W': 3,
     'STRUCT_LAST_PIVOTS': 15,
-    'UNIVERSE': None,
+    'UNIVERSE': None,        # Optionnel: restreindre l’univers, ex. ['EN.PA','ORA.PA'] ; None => tous
 }
 
 # ===========================
