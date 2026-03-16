@@ -14,6 +14,10 @@ ALPHA4_CFG = {
     'MIN_SCORE': 86,
     'LOOKBACK': 63,
     
+    # --- Filtre tendance titre (désactivable) ---
+    'USE_PRICE_SMA_FILTER': True,   # True = on exige Close >= SMA long terme
+    'PRICE_SMA_P': 200,             # période de la SMA du titre
+
     # --- Paramètres TP (Dynamiques) ---
     'TP_TREND': 0.13,        # TP standard en tendance
     'TP_RANGE': 0.10,        # TP si marché mou/baissier
@@ -228,7 +232,21 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     mm20     = stock_df['Close'].rolling(20, min_periods=20).mean()
     dist_m20 = ((stock_df['Close'] - mm20).abs() / mm20).fillna(1.0)
     sqz_flag = v4_squeeze_flag(stock_df)
-    struct_label, struct_ok = v4_structure_labels(stock_df, w=cfg['PIVOT_W'], last_pivots=cfg['STRUCT_LAST_PIVOTS'])
+    struct_label, struct_ok = v4_structure_labels(
+        stock_df,
+        w=cfg['PIVOT_W'],
+        last_pivots=cfg['STRUCT_LAST_PIVOTS']
+    )
+
+    # --- Nouveau filtre prix vs SMA long terme ---
+    price_sma_p = int(cfg.get('PRICE_SMA_P', 200))
+    price_sma = stock_df['Close'].rolling(price_sma_p, min_periods=price_sma_p).mean()
+
+    price_filter_ok = (
+        (stock_df['Close'] >= price_sma).fillna(False)
+        if cfg.get('USE_PRICE_SMA_FILTER', False)
+        else pd.Series(True, index=stock_df.index)
+    )
 
     # --- Score ---
     s_val = pd.Series(0.0, index=stock_df.index)
@@ -240,14 +258,22 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     score = pd.Series(np.where(rs_line <= 0, 0, s_val), index=stock_df.index)
 
     idx_close_on_stock_dates = idx_close.reindex(stock_df.index)
-    mkt_ok = (idx_close_on_stock_dates > idx_sma_on_stock_dates.reindex(stock_df.index)).fillna(False) if cfg['MKT_FILTER'] else pd.Series(True, index=stock_df.index)
+    mkt_ok = (
+        (idx_close_on_stock_dates > idx_sma_on_stock_dates.reindex(stock_df.index)).fillna(False)
+        if cfg['MKT_FILTER']
+        else pd.Series(True, index=stock_df.index)
+    )
 
     tr = v4_true_range(stock_df)
     atr_vec = tr.rolling(cfg['ATR_P'], min_periods=cfg['ATR_P']).mean().shift(1).fillna(0.0)
 
     ledger = []
     active_trade = None
-    start_i = cfg['SMA_P']
+
+    start_i = max(
+        cfg['SMA_P'],
+        cfg.get('PRICE_SMA_P', 200) if cfg.get('USE_PRICE_SMA_FILTER', False) else 0
+    )
 
     # --- Boucle Simulation ---
     for i, date in enumerate(stock_df.index[start_i:]):
@@ -259,7 +285,11 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
             l_perf = (row['Low']  - active_trade['e_px']) / active_trade['e_px']
 
             be_eligible = active_trade['bars_held'] >= cfg['BE_DELAY']
-            be_triggered_this_bar = (not active_trade['be_hit']) and (h_perf >= active_trade['be_trig']) and be_eligible
+            be_triggered_this_bar = (
+                (not active_trade['be_hit'])
+                and (h_perf >= active_trade['be_trig'])
+                and be_eligible
+            )
 
             effective_sl = cfg['FEES'] if active_trade['be_hit'] else -cfg['STOP_L']
             hit_tp = (h_perf >= active_trade['tp_val'])
@@ -284,17 +314,22 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     active_trade['be_hit'] = True
             continue
 
-        if bool(mkt_ok.loc[date]) and float(score.loc[date]) >= cfg['MIN_SCORE']:
+        if (
+            bool(mkt_ok.loc[date])
+            and bool(price_filter_ok.loc[date])
+            and float(score.loc[date]) >= cfg['MIN_SCORE']
+        ):
             slope = idx_slope_on_stock_dates.reindex(stock_df.index).loc[date]
             vol_pct = float(atr_vec.loc[date] / row['Close']) if row['Close'] != 0 else 0.0
             
             is_strong = (slope >= cfg['SLOPE_STRONG']) and struct_ok.loc[date]
             
             current_tp = cfg['TP_TREND']
-            if is_strong: current_tp += cfg['TP_BOOST']
-            if slope < cfg['SLOPE_TRESH']: current_tp = cfg['TP_RANGE']
+            if is_strong:
+                current_tp += cfg['TP_BOOST']
+            if slope < cfg['SLOPE_TRESH']:
+                current_tp = cfg['TP_RANGE']
             
-            # Détermination du type de BE
             is_fast_be = (slope >= 0.004 and vol_pct < cfg['VOL_LIM'])
             current_be_trig = cfg['BE_F'] if is_fast_be else cfg['BE_S']
 
@@ -329,8 +364,8 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
     df_ledger = pd.DataFrame(ledger)
     stats = {
-        'nb_trades': len(df_ledger), 
-        'gain_total': df_ledger['Gain'].sum() if len(df_ledger) else 0.0, 
+        'nb_trades': len(df_ledger),
+        'gain_total': df_ledger['Gain'].sum() if len(df_ledger) else 0.0,
         'win_rate': (df_ledger['Gain'] > 0).mean() if len(df_ledger) else 0.0
     }
     
