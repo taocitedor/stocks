@@ -14,6 +14,9 @@ ALPHA4_CFG = {
     'MIN_SCORE': 86,
     'LOOKBACK': 63,
 
+    "USE_RS_SMA_FILTER": True,  # Active le nouveau filtre de vélocité
+    "RS_SMA_P": 20,             # Période de lissage de la RS
+    
     # --- Pondération (Total 100) ---
     'W_STRUCT': 30,
     'W_VOL': 25,
@@ -259,21 +262,42 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
         else pd.Series(True, index=stock_df.index)
     )
 
-    # --- Score ---
-    s_val = pd.Series(0.0, index=stock_df.index)
-    s_val += np.where((rsi >= 50) & (rsi <= 70), cfg['W_RSI'], 0)
-    s_val += np.where(vratio > 1.5, cfg['W_VOL'], np.where(vratio > 1.1, cfg['W_VOL']/2, 0))
-    s_val += np.where(dist_m20 <= 0.01, np.where(stock_df['Close'] >= mm20, cfg['W_DIST_M20'], cfg['PENALTY_MM20']), 0)
-    s_val += np.where(struct_ok, cfg['W_STRUCT'], 0)
-    s_val += np.where(sqz_flag, cfg['W_SQZ'], 0)
-    # --- score = pd.Series(np.where(rs_line <= 0, 0, s_val), index=stock_df.index) ---
-    if cfg.get('FORCE_RS_POSITIVE', True):
-        # Disqualification si RS <= 0 (Mode Sniper)
-        score = pd.Series(np.where(rs_line <= 0, 0, s_val), index=stock_df.index)
+    # --- SCORE ---
+    # --- 1. Calcul de la RS Line et de son Momentum ---
+    rs_line = v4_rs_line(stock_df['Close'], idx_close)
+    # --- Calcul de la SMA de la RS Line pour filtrer la vélocité ---
+    rs_sma_p = cfg.get('RS_SMA_P', 20)
+    rs_sma   = rs_line.rolling(window=rs_sma_p).mean()
+    # --- Condition de Momentum : Est-ce que la RS s'accélère ? ---
+    if cfg.get('USE_RS_SMA_FILTER', False):
+        rs_momentum_ok = (rs_line > rs_sma)
     else:
-        # Score brut (Mode Détection précoce)
-        score = s_val
-
+        rs_momentum_ok = pd.Series(True, index=stock_df.index)
+    # --- 2. Calcul du Score Brut (s_val) ---
+    s_val = pd.Series(0.0, index=stock_df.index)
+    # --- Structure (Ton pilier à x pts) ---
+    s_val += np.where(struct_ok, cfg['W_STRUCT'], 0)    
+    # --- Squeeze (Ton ressort à x pts) ---
+    s_val += np.where(sqz_flag, cfg['W_SQZ'], 0)
+    # --- Volume ---
+    s_val += np.where(vratio > 1.5, cfg['W_VOL'], 
+             np.where(vratio > 1.1, cfg['W_VOL'] / 2, 0))
+    # --- RSI ---
+    s_val += np.where((rsi >= 50) & (rsi <= 70), cfg['W_RSI'], 0)
+    # Distance MM20 avec ta pénalité de -10
+    s_val += np.where(dist_m20 <= 0.01, 
+             np.where(stock_df['Close'] >= mm20, cfg['W_DIST_M20'], cfg.get('PENALTY_MM20', -10)), 
+             0)
+    # --- 3. Application des filtres de disqualification (RS) ---
+    if cfg.get('FORCE_RS_POSITIVE', True):
+        # Le titre doit battre l'indice (RS > 0) 
+        # ET sa force doit s'accélérer (si USE_RS_SMA_FILTER est True)
+        mask_final = (rs_line > 0) & rs_momentum_ok
+        score = pd.Series(np.where(mask_final, s_val, 0), index=stock_df.index)
+    else:
+        # On ne filtre QUE par le momentum (si activé), sinon c'est le score brut pur
+        score = pd.Series(np.where(rs_momentum_ok, s_val, 0), index=stock_df.index)
+    
     idx_close_on_stock_dates = idx_close.reindex(stock_df.index)
     mkt_ok = (
         (idx_close_on_stock_dates > idx_sma_on_stock_dates.reindex(stock_df.index)).fillna(False)
