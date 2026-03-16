@@ -14,8 +14,8 @@ ALPHA4_CFG = {
     'MIN_SCORE': 86,
     'LOOKBACK': 63,
 
-    "USE_RS_SMA_FILTER": True,  # Active le nouveau filtre de vélocité
-    "RS_SMA_P": 20,             # Période de lissage de la RS
+    'USE_RS_SMA_FILTER': True,  # Active le nouveau filtre de vélocité
+    'RS_SMA_P': 20,             # Période de lissage de la RS
     
     # --- Pondération (Total 100) ---
     'W_STRUCT': 30,
