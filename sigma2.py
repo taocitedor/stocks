@@ -13,6 +13,17 @@ ALPHA4_CFG = {
     'SMA_P': 100,
     'MIN_SCORE': 86,
     'LOOKBACK': 63,
+
+    # --- Pondération (Total 100) ---
+    'W_STRUCT': 30,
+    'W_VOL': 25,
+    'W_DIST_M20': 20,
+    'W_RSI': 15,
+    'W_SQZ': 10,
+
+    # --- Paramètres de Pénalité / Disqualification ---
+    'PENALTY_MM20': -10,          # Retrait de points si Close < MM20
+    'FORCE_RS_POSITIVE': True,     # Si True, RS <= 0 écrase le score à 0
     
     # --- Filtre tendance titre (désactivable) ---
     'USE_PRICE_SMA_FILTER': True,   # True = on exige Close >= SMA long terme
@@ -250,12 +261,18 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
     # --- Score ---
     s_val = pd.Series(0.0, index=stock_df.index)
-    s_val += np.where((rsi >= 50) & (rsi <= 70), 15, 0)
-    s_val += np.where(vratio > 1.5, 25, np.where(vratio > 1.1, 12.5, 0))
-    s_val += np.where(dist_m20 <= 0.01, np.where(stock_df['Close'] >= mm20, 20, -10), 0)
-    s_val += np.where(struct_ok, 30, 0)
-    s_val += np.where(sqz_flag, 10, 0)
-    score = pd.Series(np.where(rs_line <= 0, 0, s_val), index=stock_df.index)
+    s_val += np.where((rsi >= 50) & (rsi <= 70), cfg['W_RSI'], 0)
+    s_val += np.where(vratio > 1.5, cfg['W_VOL'], np.where(vratio > 1.1, cfg['W_VOL']/2, 0))
+    s_val += np.where(dist_m20 <= 0.01, np.where(stock_df['Close'] >= mm20, cfg['W_DIST_M20'], cfg['PENALTY_MM20']), 0)
+    s_val += np.where(struct_ok, cfg['W_STRUCT'], 0)
+    s_val += np.where(sqz_flag, cfg['W_SQZ'], 0)
+    # --- score = pd.Series(np.where(rs_line <= 0, 0, s_val), index=stock_df.index) ---
+    if cfg.get('FORCE_RS_POSITIVE', True):
+        # Disqualification si RS <= 0 (Mode Sniper)
+        score = pd.Series(np.where(rs_line <= 0, 0, s_val), index=stock_df.index)
+    else:
+        # Score brut (Mode Détection précoce)
+        score = s_val
 
     idx_close_on_stock_dates = idx_close.reindex(stock_df.index)
     mkt_ok = (
