@@ -14,8 +14,20 @@ ALPHA4_CFG = {
     'MIN_SCORE': 86,
     'LOOKBACK': 63,
 
-    'USE_RS_SMA_FILTER': True,  # Active le nouveau filtre de vélocité
+    'USE_RS_SMA_FILTER': False,  # Active le nouveau filtre de vélocité
     'RS_SMA_P': 20,             # Période de lissage de la RS
+
+
+    # --- Sleeve 2 : Pullback dans tendance ---
+    'USE_PULLBACK_ENTRY': True,
+    'PB_LOOKBACK': 20,       # lookback pour le plus haut récent
+    'PB_MIN_DROP': 0.03,     # pullback minimum depuis le plus haut récent (-3%)
+    'PB_MAX_DROP': 0.08,     # pullback maximum (-8%)
+    'PB_M20_TOL': 0.015,     # tolérance autour de MM20 (1.5%)
+    'PB_MIN_VOL_RATIO': 1.10,# confirmation volume minimum
+    'PB_RSI_MIN': 45,        # zone RSI de relance
+    'PB_RSI_MAX': 65,
+
     
     # --- Pondération (Total 100) ---
     'W_STRUCT': 30,
@@ -236,23 +248,24 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                    cfg: dict,
                    idx_sma_on_stock_dates: pd.Series,
                    idx_slope_on_stock_dates: pd.Series):
-    
+
     stock_df = stock_df.sort_index().copy()
 
-    # --- Indicateurs ---
-    rs_line  = v4_rs_line(stock_df['Close'], idx_close)
-    rsi      = v4_rsi(stock_df['Close'], p=14)
-    vratio   = (stock_df['Volume'] / stock_df['Volume'].rolling(20, min_periods=20).mean()).fillna(0.0)
-    mm20     = stock_df['Close'].rolling(20, min_periods=20).mean()
+    # --- Indicateurs principaux ---
+    rs_line = v4_rs_line(stock_df['Close'], idx_close)
+    rsi = v4_rsi(stock_df['Close'], p=14)
+    vratio = (stock_df['Volume'] / stock_df['Volume'].rolling(20, min_periods=20).mean()).fillna(0.0)
+    mm20 = stock_df['Close'].rolling(20, min_periods=20).mean()
     dist_m20 = ((stock_df['Close'] - mm20).abs() / mm20).fillna(1.0)
     sqz_flag = v4_squeeze_flag(stock_df)
+
     struct_label, struct_ok = v4_structure_labels(
         stock_df,
         w=cfg['PIVOT_W'],
         last_pivots=cfg['STRUCT_LAST_PIVOTS']
     )
 
-    # --- Nouveau filtre prix vs SMA long terme ---
+    # --- Filtre prix vs SMA long terme ---
     price_sma_p = int(cfg.get('PRICE_SMA_P', 200))
     price_sma = stock_df['Close'].rolling(price_sma_p, min_periods=price_sma_p).mean()
 
@@ -262,69 +275,124 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
         else pd.Series(True, index=stock_df.index)
     )
 
-    # --- SCORE ---
-    # --- 1. Calcul de la RS Line et de son Momentum ---
-    rs_line = v4_rs_line(stock_df['Close'], idx_close)
-    # --- Calcul de la SMA de la RS Line pour filtrer la vélocité ---
-    rs_sma_p = cfg.get('RS_SMA_P', 20)
-    rs_sma   = rs_line.rolling(window=rs_sma_p).mean()
-    # --- Condition de Momentum : Est-ce que la RS s'accélère ? ---
+    # --- Score coeur de stratégie ---
+    rs_sma_p = int(cfg.get('RS_SMA_P', 20))
+    rs_sma = rs_line.rolling(window=rs_sma_p).mean()
+
     if cfg.get('USE_RS_SMA_FILTER', False):
         rs_momentum_ok = (rs_line > rs_sma)
     else:
         rs_momentum_ok = pd.Series(True, index=stock_df.index)
-    # --- 2. Calcul du Score Brut (s_val) ---
+
     s_val = pd.Series(0.0, index=stock_df.index)
-    # --- Structure (Ton pilier à x pts) ---
-    s_val += np.where(struct_ok, cfg['W_STRUCT'], 0)    
-    # --- Squeeze (Ton ressort à x pts) ---
+
+    # Structure
+    s_val += np.where(struct_ok, cfg['W_STRUCT'], 0)
+
+    # Squeeze
     s_val += np.where(sqz_flag, cfg['W_SQZ'], 0)
-    # --- Volume ---
-    s_val += np.where(vratio > 1.5, cfg['W_VOL'], 
-             np.where(vratio > 1.1, cfg['W_VOL'] / 2, 0))
-    # --- RSI ---
+
+    # Volume
+    s_val += np.where(
+        vratio > 1.5,
+        cfg['W_VOL'],
+        np.where(vratio > 1.1, cfg['W_VOL'] / 2, 0)
+    )
+
+    # RSI
     s_val += np.where((rsi >= 50) & (rsi <= 70), cfg['W_RSI'], 0)
-    # Distance MM20 avec ta pénalité de -10
-    s_val += np.where(dist_m20 <= 0.01, 
-             np.where(stock_df['Close'] >= mm20, cfg['W_DIST_M20'], cfg.get('PENALTY_MM20', -10)), 
-             0)
-    # --- 3. Application des filtres de disqualification (RS) ---
+
+    # Distance MM20
+    s_val += np.where(
+        dist_m20 <= 0.01,
+        np.where(
+            stock_df['Close'] >= mm20,
+            cfg['W_DIST_M20'],
+            cfg.get('PENALTY_MM20', -10)
+        ),
+        0
+    )
+
+    # Disqualification RS
     if cfg.get('FORCE_RS_POSITIVE', True):
-        # Le titre doit battre l'indice (RS > 0) 
-        # ET sa force doit s'accélérer (si USE_RS_SMA_FILTER est True)
         mask_final = (rs_line > 0) & rs_momentum_ok
         score = pd.Series(np.where(mask_final, s_val, 0), index=stock_df.index)
     else:
-        # On ne filtre QUE par le momentum (si activé), sinon c'est le score brut pur
         score = pd.Series(np.where(rs_momentum_ok, s_val, 0), index=stock_df.index)
-    
+
+    # --- Filtre marché coeur de stratégie ---
     idx_close_on_stock_dates = idx_close.reindex(stock_df.index)
+
     mkt_ok = (
         (idx_close_on_stock_dates > idx_sma_on_stock_dates.reindex(stock_df.index)).fillna(False)
         if cfg['MKT_FILTER']
         else pd.Series(True, index=stock_df.index)
     )
 
+    # --- ATR ---
     tr = v4_true_range(stock_df)
     atr_vec = tr.rolling(cfg['ATR_P'], min_periods=cfg['ATR_P']).mean().shift(1).fillna(0.0)
 
+    # ==========================================================
+    # Sleeve 2 : Pullback dans tendance
+    # ==========================================================
+    pb_lookback = int(cfg.get('PB_LOOKBACK', 20))
+    recent_high = stock_df['High'].rolling(pb_lookback, min_periods=pb_lookback).max().shift(1)
+
+    pullback_depth = ((recent_high - stock_df['Close']) / recent_high).replace([np.inf, -np.inf], np.nan)
+
+    pullback_ok = (
+        (pullback_depth >= cfg.get('PB_MIN_DROP', 0.03))
+        & (pullback_depth <= cfg.get('PB_MAX_DROP', 0.08))
+    ).fillna(False)
+
+    near_mm20 = (
+        ((stock_df['Close'] - mm20).abs() / mm20) <= cfg.get('PB_M20_TOL', 0.015)
+    ).fillna(False)
+
+    reversal_trigger = (stock_df['Close'] > stock_df['High'].shift(1)).fillna(False)
+    vol_confirm = (vratio >= cfg.get('PB_MIN_VOL_RATIO', 1.10)).fillna(False)
+
+    rsi_relaunch = (
+        (rsi >= cfg.get('PB_RSI_MIN', 45))
+        & (rsi <= cfg.get('PB_RSI_MAX', 65))
+    ).fillna(False)
+
+    pullback_entry_ok = (
+        mkt_ok
+        & price_filter_ok
+        & (rs_line > 0)
+        & rs_momentum_ok
+        & pullback_ok
+        & near_mm20
+        & reversal_trigger
+        & vol_confirm
+        & rsi_relaunch
+    )
+
+    # --- Moteur de trading ---
     ledger = []
     active_trade = None
 
     start_i = max(
         cfg['SMA_P'],
-        cfg.get('PRICE_SMA_P', 200) if cfg.get('USE_PRICE_SMA_FILTER', False) else 0
+        cfg.get('PRICE_SMA_P', 200) if cfg.get('USE_PRICE_SMA_FILTER', False) else 0,
+        cfg.get('PB_LOOKBACK', 20) if cfg.get('USE_PULLBACK_ENTRY', False) else 0
     )
 
-    # --- Boucle Simulation ---
-    for i, date in enumerate(stock_df.index[start_i:]):
+    for date in stock_df.index[start_i:]:
         row = stock_df.loc[date]
 
+        # ======================================================
+        # Gestion du trade en cours
+        # ======================================================
         if active_trade is not None:
             active_trade['bars_held'] += 1
-            h_perf = (row['High'] - active_trade['e_px']) / active_trade['e_px']
-            l_perf = (row['Low']  - active_trade['e_px']) / active_trade['e_px']
 
+            h_perf = (row['High'] - active_trade['e_px']) / active_trade['e_px']
+            l_perf = (row['Low'] - active_trade['e_px']) / active_trade['e_px']
+
+            # BE déclenché sur la barre mais appliqué à partir de la suivante
             be_eligible = active_trade['bars_held'] >= cfg['BE_DELAY']
             be_triggered_this_bar = (
                 (not active_trade['be_hit'])
@@ -340,56 +408,78 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 raw_exit = effective_sl if hit_sl else active_trade['tp_val']
                 gain_cash = (raw_exit - cfg['FEES']) * cfg['SIZE']
                 trade_type = 'TP' if (hit_tp and not hit_sl) else ('BE' if active_trade['be_hit'] else 'SL')
-                
+
                 ledger.append({
                     'Ticker': stock_df.attrs.get('Ticker', 'NA'),
                     'Achat': active_trade['date'].strftime('%Y-%m-%d'),
                     'Vente': date.strftime('%Y-%m-%d'),
                     'Gain': float(gain_cash),
                     'Type': trade_type,
-                    'Bars': active_trade['bars_held']
+                    'Bars': active_trade['bars_held'],
+                    'Entry_Type': active_trade.get('entry_type', 'CORE'),
+                    'Entry_Score': active_trade.get('entry_score', None),
+                    'Pullback_Depth': active_trade.get('pullback_depth', None),
+                    'TP_Assigned': active_trade.get('tp_val', None),
+                    'BE_Assigned': active_trade.get('be_trig', None),
                 })
                 active_trade = None
             else:
                 if be_triggered_this_bar:
                     active_trade['be_hit'] = True
+
             continue
 
-        if (
+        # ======================================================
+        # Entrées
+        # ======================================================
+        core_entry = (
             bool(mkt_ok.loc[date])
             and bool(price_filter_ok.loc[date])
             and float(score.loc[date]) >= cfg['MIN_SCORE']
-        ):
+        )
+
+        pb_entry = (
+            bool(cfg.get('USE_PULLBACK_ENTRY', False))
+            and bool(pullback_entry_ok.loc[date])
+            and not core_entry   # priorité au moteur coeur
+        )
+
+        if core_entry or pb_entry:
             slope = idx_slope_on_stock_dates.reindex(stock_df.index).loc[date]
             vol_pct = float(atr_vec.loc[date] / row['Close']) if row['Close'] != 0 else 0.0
-            
-            is_strong = (slope >= cfg['SLOPE_STRONG']) and struct_ok.loc[date]
-            
+
+            is_strong = (slope >= cfg['SLOPE_STRONG']) and bool(struct_ok.loc[date])
+
             current_tp = cfg['TP_TREND']
             if is_strong:
                 current_tp += cfg['TP_BOOST']
             if slope < cfg['SLOPE_TRESH']:
                 current_tp = cfg['TP_RANGE']
-            
+
             is_fast_be = (slope >= 0.004 and vol_pct < cfg['VOL_LIM'])
             current_be_trig = cfg['BE_F'] if is_fast_be else cfg['BE_S']
+
+            entry_type = 'CORE' if core_entry else 'PULLBACK'
 
             active_trade = {
                 'date': date,
                 'e_px': float(row['Close']),
-                'tp_val': current_tp,
-                'be_trig': current_be_trig,
+                'tp_val': float(current_tp),
+                'be_trig': float(current_be_trig),
                 'be_type': 'FAST' if is_fast_be else 'SLOW',
                 'be_hit': False,
-                'bars_held': 0
+                'bars_held': 0,
+                'entry_type': entry_type,
+                'entry_score': float(score.loc[date]) if pd.notna(score.loc[date]) else None,
+                'pullback_depth': float(pullback_depth.loc[date]) if pb_entry and pd.notna(pullback_depth.loc[date]) else None
             }
 
-    # --- Capture du Trade en cours ---
+    # --- Trade en cours ---
     open_trade = None
     if active_trade is not None:
         last_close = float(stock_df.iloc[-1]['Close'])
         perf_actuelle = (last_close - active_trade['e_px']) / active_trade['e_px']
-        
+
         open_trade = {
             'Ticker': stock_df.attrs.get('Ticker', 'NA'),
             'Date_Achat': active_trade['date'].strftime('%Y-%m-%d'),
@@ -400,7 +490,10 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
             'Seuil_BE_Pct': round(active_trade['be_trig'] * 100, 2),
             'Configuration_BE': active_trade['be_type'],
             'Statut_BE': 'SECURISE (BE)' if active_trade['be_hit'] else 'A RISQUE (SL)',
-            'Bars_Held': active_trade['bars_held']
+            'Bars_Held': active_trade['bars_held'],
+            'Entry_Type': active_trade.get('entry_type', 'CORE'),
+            'Entry_Score': active_trade.get('entry_score', None),
+            'Pullback_Depth': active_trade.get('pullback_depth', None),
         }
 
     df_ledger = pd.DataFrame(ledger)
@@ -409,7 +502,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
         'gain_total': df_ledger['Gain'].sum() if len(df_ledger) else 0.0,
         'win_rate': (df_ledger['Gain'] > 0).mean() if len(df_ledger) else 0.0
     }
-    
+
     return stats, ledger, open_trade
                        
 # ===========================
