@@ -14,8 +14,10 @@ ALPHA4_CFG = {
     'MIN_SCORE': 86,
     'LOOKBACK': 63,
 
-    'USE_RS_SMA_FILTER': True,  # Active le nouveau filtre de vélocité
+    'USE_RS_SMA_FILTER': False,  # Active le nouveau filtre de vélocité
     'RS_SMA_P': 20,             # Période de lissage de la RS
+    
+    'USE_MKT_CUT': True,         # Active la sortie anticipée sur retournement CAC40
     
     # --- Pondération (Total 100) ---
     'W_STRUCT': 30,
@@ -25,7 +27,7 @@ ALPHA4_CFG = {
     'W_SQZ': 10,
 
     # --- Paramètres de Pénalité / Disqualification ---
-    'PENALTY_MM20': -10,          # Retrait de points si Close < MM20
+    'PENALTY_MM20': -10,          # Retrait de points si Close < MM20 - aucun effet au final
     'FORCE_RS_POSITIVE': True,     # Si True, RS <= 0 écrase le score à 0
     
     # --- Filtre tendance titre (désactivable) ---
@@ -33,7 +35,7 @@ ALPHA4_CFG = {
     'PRICE_SMA_P': 200,             # période de la SMA du titre
 
     # --- Paramètres TP (Dynamiques) ---
-    'TP_TREND': 0.13,        # TP standard en tendance
+    'TP_TREND': 0.135,        # TP standard en tendance
     'TP_RANGE': 0.10,        # TP si marché mou/baissier
     'TP_BOOST': 0.02,        # Bonus TP si fort momentum (ex: 0.13 + 0.02 = 15%)
     'SLOPE_TRESH': -0.003,   # Seuil pente SMA marché
@@ -236,68 +238,53 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                    cfg: dict,
                    idx_sma_on_stock_dates: pd.Series,
                    idx_slope_on_stock_dates: pd.Series):
-    
+    """
+    Moteur de simulation Titanium v4.2 avec Coupe-Circuit Marché (MKT_CUT).
+    """
     stock_df = stock_df.sort_index().copy()
 
-    # --- Indicateurs ---
+    # --- 1. Indicateurs Techniques ---
     rs_line  = v4_rs_line(stock_df['Close'], idx_close)
     rsi      = v4_rsi(stock_df['Close'], p=14)
     vratio   = (stock_df['Volume'] / stock_df['Volume'].rolling(20, min_periods=20).mean()).fillna(0.0)
     mm20     = stock_df['Close'].rolling(20, min_periods=20).mean()
     dist_m20 = ((stock_df['Close'] - mm20).abs() / mm20).fillna(1.0)
     sqz_flag = v4_squeeze_flag(stock_df)
+    
     struct_label, struct_ok = v4_structure_labels(
         stock_df,
         w=cfg['PIVOT_W'],
         last_pivots=cfg['STRUCT_LAST_PIVOTS']
     )
 
-    # --- Nouveau filtre prix vs SMA long terme ---
+    # --- 2. Filtres de Tendance Titre (SMA Long Terme) ---
     price_sma_p = int(cfg.get('PRICE_SMA_P', 200))
     price_sma = stock_df['Close'].rolling(price_sma_p, min_periods=price_sma_p).mean()
-
     price_filter_ok = (
         (stock_df['Close'] >= price_sma).fillna(False)
         if cfg.get('USE_PRICE_SMA_FILTER', False)
         else pd.Series(True, index=stock_df.index)
     )
 
-    # --- SCORE ---
-    # --- 1. Calcul de la RS Line et de son Momentum ---
-    rs_line = v4_rs_line(stock_df['Close'], idx_close)
-    # --- Calcul de la SMA de la RS Line pour filtrer la vélocité ---
+    # --- 3. Calcul du Score & Momentum RS ---
     rs_sma_p = cfg.get('RS_SMA_P', 20)
     rs_sma   = rs_line.rolling(window=rs_sma_p).mean()
-    # --- Condition de Momentum : Est-ce que la RS s'accélère ? ---
-    if cfg.get('USE_RS_SMA_FILTER', False):
-        rs_momentum_ok = (rs_line > rs_sma)
-    else:
-        rs_momentum_ok = pd.Series(True, index=stock_df.index)
-    # --- 2. Calcul du Score Brut (s_val) ---
+    rs_momentum_ok = (rs_line > rs_sma) if cfg.get('USE_RS_SMA_FILTER', False) else pd.Series(True, index=stock_df.index)
+
     s_val = pd.Series(0.0, index=stock_df.index)
-    # --- Structure (Ton pilier à x pts) ---
     s_val += np.where(struct_ok, cfg['W_STRUCT'], 0)    
-    # --- Squeeze (Ton ressort à x pts) ---
     s_val += np.where(sqz_flag, cfg['W_SQZ'], 0)
-    # --- Volume ---
-    s_val += np.where(vratio > 1.5, cfg['W_VOL'], 
-             np.where(vratio > 1.1, cfg['W_VOL'] / 2, 0))
-    # --- RSI ---
+    s_val += np.where(vratio > 1.5, cfg['W_VOL'], np.where(vratio > 1.1, cfg['W_VOL'] / 2, 0))
     s_val += np.where((rsi >= 50) & (rsi <= 70), cfg['W_RSI'], 0)
-    # Distance MM20 avec ta pénalité de -10
     s_val += np.where(dist_m20 <= 0.01, 
-             np.where(stock_df['Close'] >= mm20, cfg['W_DIST_M20'], cfg.get('PENALTY_MM20', -10)), 
-             0)
-    # --- 3. Application des filtres de disqualification (RS) ---
+             np.where(stock_df['Close'] >= mm20, cfg['W_DIST_M20'], cfg.get('PENALTY_MM20', -10)), 0)
+
     if cfg.get('FORCE_RS_POSITIVE', True):
-        # Le titre doit battre l'indice (RS > 0) 
-        # ET sa force doit s'accélérer (si USE_RS_SMA_FILTER est True)
-        mask_final = (rs_line > 0) & rs_momentum_ok
-        score = pd.Series(np.where(mask_final, s_val, 0), index=stock_df.index)
+        score = pd.Series(np.where((rs_line > 0) & rs_momentum_ok, s_val, 0), index=stock_df.index)
     else:
-        # On ne filtre QUE par le momentum (si activé), sinon c'est le score brut pur
         score = pd.Series(np.where(rs_momentum_ok, s_val, 0), index=stock_df.index)
     
+    # --- 4. Filtre Marché (SMA100) ---
     idx_close_on_stock_dates = idx_close.reindex(stock_df.index)
     mkt_ok = (
         (idx_close_on_stock_dates > idx_sma_on_stock_dates.reindex(stock_df.index)).fillna(False)
@@ -310,13 +297,9 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
     ledger = []
     active_trade = None
+    start_i = max(cfg['SMA_P'], cfg.get('PRICE_SMA_P', 200) if cfg.get('USE_PRICE_SMA_FILTER', False) else 0)
 
-    start_i = max(
-        cfg['SMA_P'],
-        cfg.get('PRICE_SMA_P', 200) if cfg.get('USE_PRICE_SMA_FILTER', False) else 0
-    )
-
-    # --- Boucle Simulation ---
+    # --- 5. Boucle de Simulation ---
     for i, date in enumerate(stock_df.index[start_i:]):
         row = stock_df.loc[date]
 
@@ -324,52 +307,67 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
             active_trade['bars_held'] += 1
             h_perf = (row['High'] - active_trade['e_px']) / active_trade['e_px']
             l_perf = (row['Low']  - active_trade['e_px']) / active_trade['e_px']
+            c_perf = (row['Close'] - active_trade['e_px']) / active_trade['e_px']
 
-            be_eligible = active_trade['bars_held'] >= cfg['BE_DELAY']
-            be_triggered_this_bar = (
-                (not active_trade['be_hit'])
-                and (h_perf >= active_trade['be_trig'])
-                and be_eligible
-            )
+            # --- [NOUVEAU] LOGIQUE COUPE-CIRCUIT (MKT_CUT) ---
+            mkt_degraded = not bool(mkt_ok.loc[date])
+            
+            if cfg.get('USE_MKT_CUT', False) and mkt_degraded:
+                # CAS A : Sous le prix d'achat -> Sortie immédiate
+                if c_perf <= 0:
+                    ledger.append({
+                        'Ticker': stock_df.attrs.get('Ticker', 'NA'),
+                        'Achat': active_trade['date'].strftime('%Y-%m-%d'),
+                        'Vente': date.strftime('%Y-%m-%d'),
+                        'Gain': float((c_perf - cfg['FEES']) * cfg['SIZE']),
+                        'Type': 'MKT_CUT_LOSS',
+                        'Bars': active_trade['bars_held']
+                    })
+                    active_trade = None
+                    continue
 
-            effective_sl = cfg['FEES'] if active_trade['be_hit'] else -cfg['STOP_L']
-            hit_tp = (h_perf >= active_trade['tp_val'])
-            hit_sl = (l_perf <= effective_sl)
-
-            if hit_tp or hit_sl:
-                raw_exit = effective_sl if hit_sl else active_trade['tp_val']
-                gain_cash = (raw_exit - cfg['FEES']) * cfg['SIZE']
-                trade_type = 'TP' if (hit_tp and not hit_sl) else ('BE' if active_trade['be_hit'] else 'SL')
-                
-                ledger.append({
-                    'Ticker': stock_df.attrs.get('Ticker', 'NA'),
-                    'Achat': active_trade['date'].strftime('%Y-%m-%d'),
-                    'Vente': date.strftime('%Y-%m-%d'),
-                    'Gain': float(gain_cash),
-                    'Type': trade_type,
-                    'Bars': active_trade['bars_held']
-                })
-                active_trade = None
-            else:
-                if be_triggered_this_bar:
+                # CAS B : En gain -> On force le BE immédiatement
+                elif not active_trade['be_hit']:
                     active_trade['be_hit'] = True
-            continue
+                    active_trade['be_type'] = 'MKT_FORCED_BE'
 
-        if (
-            bool(mkt_ok.loc[date])
-            and bool(price_filter_ok.loc[date])
-            and float(score.loc[date]) >= cfg['MIN_SCORE']
-        ):
+            # --- GESTION DES SORTIES STANDARDS ---
+            if active_trade is not None:
+                be_eligible = active_trade['bars_held'] >= cfg['BE_DELAY']
+                be_triggered_this_bar = (not active_trade['be_hit'] and h_perf >= active_trade['be_trig'] and be_eligible)
+
+                effective_sl = cfg['FEES'] if active_trade['be_hit'] else -cfg['STOP_L']
+                hit_tp = (h_perf >= active_trade['tp_val'])
+                hit_sl = (l_perf <= effective_sl)
+
+                if hit_tp or hit_sl:
+                    trade_type = 'TP' if (hit_tp and not hit_sl) else ('BE' if active_trade['be_hit'] else 'SL')
+                    raw_exit = effective_sl if hit_sl else active_trade['tp_val']
+                    gain_cash = (raw_exit - cfg['FEES']) * cfg['SIZE']
+                    
+                    ledger.append({
+                        'Ticker': stock_df.attrs.get('Ticker', 'NA'),
+                        'Achat': active_trade['date'].strftime('%Y-%m-%d'),
+                        'Vente': date.strftime('%Y-%m-%d'),
+                        'Gain': float(gain_cash),
+                        'Type': trade_type,
+                        'Bars': active_trade['bars_held']
+                    })
+                    active_trade = None
+                else:
+                    if be_triggered_this_bar:
+                        active_trade['be_hit'] = True
+                continue
+
+        # --- LOGIQUE D'ENTRÉE ---
+        if (bool(mkt_ok.loc[date]) and bool(price_filter_ok.loc[date]) and float(score.loc[date]) >= cfg['MIN_SCORE']):
             slope = idx_slope_on_stock_dates.reindex(stock_df.index).loc[date]
             vol_pct = float(atr_vec.loc[date] / row['Close']) if row['Close'] != 0 else 0.0
             
             is_strong = (slope >= cfg['SLOPE_STRONG']) and struct_ok.loc[date]
-            
             current_tp = cfg['TP_TREND']
-            if is_strong:
-                current_tp += cfg['TP_BOOST']
-            if slope < cfg['SLOPE_TRESH']:
-                current_tp = cfg['TP_RANGE']
+            if is_strong: current_tp += cfg['TP_BOOST']
+            if slope < cfg['SLOPE_TRESH']: current_tp = cfg['TP_RANGE']
             
             is_fast_be = (slope >= 0.004 and vol_pct < cfg['VOL_LIM'])
             current_be_trig = cfg['BE_F'] if is_fast_be else cfg['BE_S']
@@ -384,21 +382,17 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 'bars_held': 0
             }
 
-    # --- Capture du Trade en cours ---
+    # --- 6. Gestion du Trade Ouvert (pour le rapport final) ---
     open_trade = None
     if active_trade is not None:
         last_close = float(stock_df.iloc[-1]['Close'])
         perf_actuelle = (last_close - active_trade['e_px']) / active_trade['e_px']
-        
         open_trade = {
             'Ticker': stock_df.attrs.get('Ticker', 'NA'),
             'Date_Achat': active_trade['date'].strftime('%Y-%m-%d'),
             'Prix_Entree': round(active_trade['e_px'], 2),
             'Prix_Actuel': round(last_close, 2),
             'Perf_Latente_Pct': round(perf_actuelle * 100, 2),
-            'Objectif_TP_Pct': round(active_trade['tp_val'] * 100, 2),
-            'Seuil_BE_Pct': round(active_trade['be_trig'] * 100, 2),
-            'Configuration_BE': active_trade['be_type'],
             'Statut_BE': 'SECURISE (BE)' if active_trade['be_hit'] else 'A RISQUE (SL)',
             'Bars_Held': active_trade['bars_held']
         }
@@ -411,7 +405,8 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     }
     
     return stats, ledger, open_trade
-                       
+
+
 # ===========================
 #  alpha4 : moteur multi-tickers — NOM DIFFERENT
 # ===========================
