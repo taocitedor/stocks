@@ -7,54 +7,70 @@ from google.cloud import bigquery
 ALPHA4_CFG = {
     'PROJECT': 'project-16c606d0-6527-4644-907',
     'DB_SET': 'Trading',
-    'TBL': 'CC_Historique_Cours',
+    'TBL': 'CC_Historique_Cours_v2',
     'IDX': '^FCHI',
+
+    # --- Moteur principal ---
     'MKT_FILTER': True,
     'SMA_P': 100,
-    'MIN_SCORE': 86,
     'LOOKBACK': 63,
+    'MIN_SCORE': 86,
 
-    'USE_RS_SMA_FILTER': True,   # Active le filtre de vélocité
-    'RS_SMA_P': 20,              # Période de lissage de la RS
+    # --- RS / vélocité ---
+    'USE_RS_SMA_FILTER': False,   # false = ton gold standard actuel
+    'RS_SMA_P': 20,
 
-    # --- Pondération (Total 100) ---
+    # --- Pondérations score ---
     'W_STRUCT': 30,
     'W_VOL': 25,
     'W_DIST_M20': 20,
     'W_RSI': 15,
     'W_SQZ': 10,
 
-    # --- Paramètres de Pénalité / Disqualification ---
-    'PENALTY_MM20': -10,         # Retrait de points si Close < MM20
-    'FORCE_RS_POSITIVE': True,   # Si True, RS <= 0 écrase le score à 0
+    # --- Pénalité / disqualification ---
+    'PENALTY_MM20': -10,
+    'FORCE_RS_POSITIVE': True,
 
-    # --- Filtre tendance titre (désactivable) ---
-    'USE_PRICE_SMA_FILTER': True,  # True = on exige Close >= SMA long terme
-    'PRICE_SMA_P': 200,            # période de la SMA du titre
+    # --- Filtre tendance titre ---
+    'USE_PRICE_SMA_FILTER': True,
+    'PRICE_SMA_P': 200,
 
-    # --- Paramètres TP (Dynamiques) ---
-    'TP_TREND': 0.13,        # TP standard en tendance
-    'TP_RANGE': 0.10,        # TP si marché mou/baissier
-    'TP_BOOST': 0.02,        # Bonus TP si fort momentum
-    'SLOPE_TRESH': -0.003,   # Seuil pente SMA marché
-    'SLOPE_STRONG': 0.005,   # Seuil pour déclencher le "Boost" de performance
+    # --- TP dynamiques ---
+    'TP_TREND': 0.135,
+    'TP_RANGE': 0.10,
+    'TP_BOOST': 0.025,
+    'SLOPE_TRESH': 0.002,
+    'SLOPE_STRONG': 0.007,
 
-    # --- Paramètres BE (Adaptatifs) ---
-    'BE_F': 0.06,            # BE fast (marché propre)
-    'BE_S': 0.0495,          # BE slow (marché volatil)
-    'BE_DELAY': 3,           # Nombre de barres minimum avant d'autoriser le BE
-    'VOL_LIM': 0.025,        # Limite volatilité pour passer de BE_F à BE_S
+    # --- BE adaptatif ---
+    'BE_F': 0.06,
+    'BE_S': 0.0495,
+    'BE_DELAY': 3,
+    'VOL_LIM': 0.025,
 
-    # --- Gestion Risque & Frais ---
+    # --- Profit Lock ---
+    'USE_PROFIT_LOCK': True,
+
+    # Palier 1 : MFE >= 8% => on verrouille ~ +1.5% net
+    'LOCK1_TRIGGER': 0.08,
+    'LOCK1_RAW': 0.0206,   # FEES + 0.015
+
+    # Palier 2 : MFE >= 10% => on verrouille ~ +3.0% net
+    'LOCK2_TRIGGER': 0.10,
+    'LOCK2_RAW': 0.0356,   # FEES + 0.030
+
+    # --- Gestion risque & frais ---
     'ATR_P': 50,
-    'STOP_L': 0.10,          # Stop Loss initial
-    'FEES': 0.0056,          # Frais (appliqués à l'entrée et à la sortie)
+    'STOP_L': 0.10,
+    'FEES': 0.0056,
     'SIZE': 4000,
 
-    # --- Structure & Pivots ---
+    # --- Structure & pivots ---
     'PIVOT_W': 3,
     'STRUCT_LAST_PIVOTS': 15,
-    'UNIVERSE': None,        # Optionnel: restreindre l’univers, ex. ['EN.PA','ORA.PA'] ; None => tous
+
+    # --- Univers ---
+    'UNIVERSE': None
 }
 
 # ===========================
@@ -63,18 +79,18 @@ ALPHA4_CFG = {
 def v4_rs_line(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
     """
     RS alignée GAS :
-      - besoin d'au moins 63 barres côté titre
-      - stock_perf = close[t] vs close[t-62]
-      - indice : dernier close <= date du titre, puis 62 barres plus tôt
-      - RS = (stock_perf - idx_perf) * 100
+    - besoin d'au moins 63 barres côté titre
+    - stock_perf = close[t] vs close[t-62]
+    - indice : dernier close <= date du titre, puis 62 barres plus tôt
+    - RS = (stock_perf - idx_perf) * 100
     """
     stock_close = pd.to_numeric(stock_close, errors='coerce').sort_index()
-    idx_close   = pd.to_numeric(idx_close, errors='coerce').sort_index()
+    idx_close = pd.to_numeric(idx_close, errors='coerce').sort_index()
 
     s_dates = stock_close.index.to_numpy()
-    s_vals  = stock_close.to_numpy(dtype=float)
+    s_vals = stock_close.to_numpy(dtype=float)
     i_dates = idx_close.index.to_numpy()
-    i_vals  = idx_close.to_numpy(dtype=float)
+    i_vals = idx_close.to_numpy(dtype=float)
 
     out = np.zeros(len(stock_close), dtype=float)
 
@@ -102,7 +118,7 @@ def v4_rs_line(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
             continue
 
         stock_perf = (s_curr - s_prev) / s_prev
-        idx_perf   = (i_curr - i_prev) / i_prev
+        idx_perf = (i_curr - i_prev) / i_prev
         out[i] = (stock_perf - idx_perf) * 100.0
 
     return pd.Series(out, index=stock_close.index, name='RS_Line')
@@ -114,6 +130,7 @@ def v4_rsi(close: pd.Series, p: int = 14) -> pd.Series:
     """
     close = pd.to_numeric(close, errors='coerce')
     diff = close.diff()
+
     gains = diff.clip(lower=0).rolling(p, min_periods=p).sum()
     losses = (-diff.clip(upper=0)).rolling(p, min_periods=p).sum()
 
@@ -123,17 +140,18 @@ def v4_rsi(close: pd.Series, p: int = 14) -> pd.Series:
 
     rsi[zero_losses] = 100.0
     rsi[normal_mask] = 100.0 - (100.0 / (1.0 + (gains[normal_mask] / losses[normal_mask])))
+
     return rsi.fillna(0.0)
 
 
 def v4_pivot_events(df: pd.DataFrame, w: int = 3):
     """
     Pivots stricts comme GAS :
-      - H si aucun voisin (i-w..i+w, hors i) n'a high >= high[i]
-      - L si aucun voisin (i-w..i+w, hors i) n'a low  <= low[i]
+    - H si aucun voisin (i-w..i+w, hors i) n'a high >= high[i]
+    - L si aucun voisin (i-w..i+w, hors i) n'a low <= low[i]
     """
     highs = pd.to_numeric(df['High'], errors='coerce').to_numpy(dtype=float)
-    lows  = pd.to_numeric(df['Low'],  errors='coerce').to_numpy(dtype=float)
+    lows = pd.to_numeric(df['Low'], errors='coerce').to_numpy(dtype=float)
 
     pivots = []
     n = len(df)
@@ -163,9 +181,9 @@ def v4_pivot_events(df: pd.DataFrame, w: int = 3):
 def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
     """
     Structure GAS :
-      - un pivot détecté à k devient visible à k+w
-      - à chaque date i, on prend les pivots visibles, on slice(-15)
-      - HH/LH sur les deux derniers H ; HL/LL sur les deux derniers L
+    - un pivot détecté à k devient visible à k+w
+    - à chaque date i, on prend les pivots visibles, on slice(-last_pivots)
+    - HH/LH sur les deux derniers H ; HL/LL sur les deux derniers L
     """
     df = df.sort_index().copy()
     n = len(df)
@@ -185,9 +203,9 @@ def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
         if visible_on[i]:
             active.extend(visible_on[i])
 
-        p15 = active[-last_pivots:]
-        h = [x for x in p15 if x['type'] == 'H']
-        l = [x for x in p15 if x['type'] == 'L']
+        p_last = active[-last_pivots:]
+        h = [x for x in p_last if x['type'] == 'H']
+        l = [x for x in p_last if x['type'] == 'L']
 
         if len(h) < 2 or len(l) < 2:
             struct_label[i] = 'ND'
@@ -199,6 +217,7 @@ def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
             + '+'
             + ('HL' if l[-1]['value'] > l[-2]['value'] else 'LL')
         )
+
         struct_label[i] = label
         struct_ok[i] = ('HH' in label and 'HL' in label)
 
@@ -223,16 +242,18 @@ def v4_true_range(df: pd.DataFrame) -> pd.Series:
     high = pd.to_numeric(df['High'], errors='coerce')
     low = pd.to_numeric(df['Low'], errors='coerce')
     prev_close = pd.to_numeric(df['Close'], errors='coerce').shift(1)
+
     tr = pd.concat([
         high - low,
         (high - prev_close).abs(),
         (low - prev_close).abs(),
     ], axis=1).max(axis=1)
+
     return tr
 
 
 # ===========================
-# Moteur par Ticker
+# Moteur par ticker
 # ===========================
 def _v4_run_ticker(stock_df: pd.DataFrame,
                    idx_close: pd.Series,
@@ -266,8 +287,8 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
         else pd.Series(True, index=stock_df.index)
     )
 
-    # --- SCORE ---
-    rs_sma_p = cfg.get('RS_SMA_P', 20)
+    # --- RS momentum ---
+    rs_sma_p = int(cfg.get('RS_SMA_P', 20))
     rs_sma = rs_line.rolling(window=rs_sma_p).mean()
 
     if cfg.get('USE_RS_SMA_FILTER', False):
@@ -275,36 +296,23 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     else:
         rs_momentum_ok = pd.Series(True, index=stock_df.index)
 
+    # --- Score ---
     s_val = pd.Series(0.0, index=stock_df.index)
 
-    # Structure
     s_val += np.where(struct_ok, cfg['W_STRUCT'], 0)
-
-    # Squeeze
     s_val += np.where(sqz_flag, cfg['W_SQZ'], 0)
-
-    # Volume
     s_val += np.where(
         vratio > 1.5,
         cfg['W_VOL'],
         np.where(vratio > 1.1, cfg['W_VOL'] / 2, 0)
     )
-
-    # RSI
     s_val += np.where((rsi >= 50) & (rsi <= 70), cfg['W_RSI'], 0)
-
-    # Distance MM20
     s_val += np.where(
         dist_m20 <= 0.01,
-        np.where(
-            stock_df['Close'] >= mm20,
-            cfg['W_DIST_M20'],
-            cfg.get('PENALTY_MM20', -10)
-        ),
+        np.where(stock_df['Close'] >= mm20, cfg['W_DIST_M20'], cfg.get('PENALTY_MM20', -10)),
         0
     )
 
-    # Disqualification RS
     if cfg.get('FORCE_RS_POSITIVE', True):
         mask_final = (rs_line > 0) & rs_momentum_ok
         score = pd.Series(np.where(mask_final, s_val, 0), index=stock_df.index)
@@ -313,7 +321,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
     # --- Filtre marché ---
     idx_close_on_stock_dates = idx_close.reindex(stock_df.index)
-
     mkt_ok = (
         (idx_close_on_stock_dates > idx_sma_on_stock_dates.reindex(stock_df.index)).fillna(False)
         if cfg['MKT_FILTER']
@@ -324,7 +331,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     tr = v4_true_range(stock_df)
     atr_vec = tr.rolling(cfg['ATR_P'], min_periods=cfg['ATR_P']).mean().shift(1).fillna(0.0)
 
-    # --- Moteur trading ---
     ledger = []
     active_trade = None
 
@@ -333,6 +339,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
         cfg.get('PRICE_SMA_P', 200) if cfg.get('USE_PRICE_SMA_FILTER', False) else 0
     )
 
+    # --- Boucle simulation ---
     for date in stock_df.index[start_i:]:
         row = stock_df.loc[date]
 
@@ -360,14 +367,37 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 and be_eligible
             )
 
+            # --- Profit Lock ---
+            if cfg.get('USE_PROFIT_LOCK', False):
+                if active_trade['mfe_pct'] >= cfg.get('LOCK2_TRIGGER', 0.10):
+                    active_trade['profit_lock_raw'] = cfg.get('LOCK2_RAW', 0.0356)
+                    active_trade['profit_lock_level'] = 'LOCK2'
+                elif active_trade['mfe_pct'] >= cfg.get('LOCK1_TRIGGER', 0.08):
+                    if active_trade['profit_lock_raw'] is None:
+                        active_trade['profit_lock_raw'] = cfg.get('LOCK1_RAW', 0.0206)
+                        active_trade['profit_lock_level'] = 'LOCK1'
+
+            # Stop effectif
             effective_sl = cfg['FEES'] if active_trade['be_hit'] else -cfg['STOP_L']
+
+            # Si profit lock actif, il remonte le stop si plus protecteur
+            if active_trade.get('profit_lock_raw') is not None:
+                effective_sl = max(effective_sl, active_trade['profit_lock_raw'])
+
             hit_tp = (h_perf >= active_trade['tp_val'])
             hit_sl = (l_perf <= effective_sl)
 
             if hit_tp or hit_sl:
                 raw_exit = effective_sl if hit_sl else active_trade['tp_val']
                 gain_cash = (raw_exit - cfg['FEES']) * cfg['SIZE']
-                trade_type = 'TP' if (hit_tp and not hit_sl) else ('BE' if active_trade['be_hit'] else 'SL')
+
+                if hit_tp and not hit_sl:
+                    trade_type = 'TP'
+                else:
+                    if active_trade.get('profit_lock_raw') is not None and effective_sl > cfg['FEES']:
+                        trade_type = active_trade.get('profit_lock_level', 'LOCK')
+                    else:
+                        trade_type = 'BE' if active_trade['be_hit'] else 'SL'
 
                 if trade_type == 'TP':
                     active_trade['bars_to_tp'] = active_trade['bars_held']
@@ -392,8 +422,13 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     'Bars_to_SL': active_trade['bars_to_sl'],
                     'TP_Assigned_Pct': round(active_trade['tp_val'] * 100, 2),
                     'BE_Assigned_Pct': round(active_trade['be_trig'] * 100, 2),
-                    'BE_Type': active_trade['be_type']
+                    'BE_Type': active_trade['be_type'],
+
+                    # --- Profit Lock ---
+                    'Profit_Lock_Level': active_trade.get('profit_lock_level', None),
+                    'Profit_Lock_Raw_Pct': round(active_trade['profit_lock_raw'] * 100, 2) if active_trade.get('profit_lock_raw') is not None else None
                 })
+
                 active_trade = None
             else:
                 if be_triggered_this_bar:
@@ -434,6 +469,10 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 'be_hit': False,
                 'bars_held': 0,
 
+                # --- Profit lock state ---
+                'profit_lock_raw': None,
+                'profit_lock_level': None,
+
                 # --- Logging analytique ---
                 'mfe_pct': 0.0,
                 'mae_pct': 0.0,
@@ -467,7 +506,11 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
             'MAE_Pct': round(active_trade['mae_pct'] * 100, 2),
             'Max_Close_Pct': round(active_trade['max_close_pct'] * 100, 2),
             'Min_Close_Pct': round(active_trade['min_close_pct'] * 100, 2),
-            'Bars_to_BE': active_trade['bars_to_be']
+            'Bars_to_BE': active_trade['bars_to_be'],
+
+            # --- Profit lock ---
+            'Profit_Lock_Level': active_trade.get('profit_lock_level', None),
+            'Profit_Lock_Raw_Pct': round(active_trade['profit_lock_raw'] * 100, 2) if active_trade.get('profit_lock_raw') is not None else None
         }
 
     df_ledger = pd.DataFrame(ledger)
@@ -481,7 +524,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
 
 # ===========================
-# alpha4 : moteur multi-tickers
+# Moteur multi-tickers
 # ===========================
 def alpha4(cfg):
     client = bigquery.Client(project=cfg['PROJECT'])
@@ -534,7 +577,7 @@ def alpha4(cfg):
 
     return {
         'metadata': {
-            'system': 'Titanium v4.2 + logging',
+            'system': 'Titanium v4.2 + logging + profit_lock',
             'universe': len(universe)
         },
         'portfolio': {
