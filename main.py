@@ -353,6 +353,56 @@ def get_batch_historic():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/get_index_safe_history', methods=['GET'])
+def get_index_safe_history():
+    ticker_symbol = request.args.get('ticker')
+    target_date = request.args.get('date') # Format YYYY-MM-DD
+    
+    if not ticker_symbol or not target_date:
+        return jsonify({"error": "Paramètres 'ticker' et 'date' requis"}), 400
+
+    try:
+        # 1. On définit la borne de fin (lendemain de la cible pour inclure la cible)
+        from datetime import datetime, timedelta
+        end_dt = datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)
+        
+        stock = yf.Ticker(ticker_symbol)
+        
+        # 2. On demande les 5 derniers jours se terminant à cette date
+        # C'est la méthode la plus robuste pour ^SBF120 et PX4NR.PA
+        df = stock.history(end=end_dt.strftime('%Y-%m-%d'), 
+                           period="5d", 
+                           auto_adjust=False, 
+                           actions=False)
+        
+        if df.empty:
+            return jsonify({
+                "status": "error", 
+                "message": f"Aucune donnée pour {ticker_symbol} avant le {target_date}"
+            }), 404
+
+        # 3. Nettoyage technique de l'index (supprime +01:00)
+        df.index = df.index.tz_localize(None)
+        
+        # On récupère la dernière ligne disponible dans cette fenêtre
+        last_row = df.iloc[-1]
+        actual_date = last_row.name.strftime('%Y-%m-%d')
+
+        return jsonify({
+            "ticker": ticker_symbol,
+            "requested_date": target_date,
+            "actual_date": actual_date,
+            "close": round(float(last_row['Close']), 3),
+            "high": round(float(last_row['High']), 3),
+            "low": round(float(last_row['Low']), 3),
+            "volume": int(last_row['Volume']),
+            "status": "success",
+            "method": "safe_window_5d"
+        })
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 if __name__ == "__main__":
     # Cloud Run utilise le port 8080 par défaut
