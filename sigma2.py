@@ -1,4 +1,4 @@
-# ==== START walkforward_sigma2.py ====
+# ==== START walkforward_sigma2_cached.py ====
 import json
 import copy
 import numpy as np
@@ -6,7 +6,7 @@ import pandas as pd
 from google.cloud import bigquery
 
 # =========================================================
-# CONFIG DE BASE (reprend l'esprit de ton moteur actuel)
+# CONFIG DE BASE
 # =========================================================
 ALPHA4_CFG = {
     # --- Configuration Backend ---
@@ -72,10 +72,10 @@ ALPHA4_CFG = {
     'PIVOT_W': 3,
     'STRUCT_LAST_PIVOTS': 15,
 
-    # --- Filtre régime déjà validé dans ta base ---
+    # --- Filtre régime déjà utilisé ---
     'EXCLUDE_TP135_SLOW': True,
 
-    # --- Filtre 10 + SLOW walk-forward ---
+    # --- Filtre 10 + SLOW walk-forward (piloté par les variantes) ---
     'USE_RANGE_SLOW_CONTEXT_FILTER': False,
     'RANGE_SLOW_SCORE_MODE': 'EQ100',   # 'EQ100' ou 'GE97_5'
     'RANGE_SLOW_MAX_IDX_GAP': 1.5,      # 1.0 / 1.5 / 2.0
@@ -88,12 +88,12 @@ ALPHA4_CFG = {
 # VARIANTES A TESTER (fixées d'avance)
 # =========================================================
 VARIANTS = [
-    {'name': 'EQ100_GAP1.0', 'RANGE_SLOW_SCORE_MODE': 'EQ100',  'RANGE_SLOW_MAX_IDX_GAP': 1.0},
-    {'name': 'EQ100_GAP1.5', 'RANGE_SLOW_SCORE_MODE': 'EQ100',  'RANGE_SLOW_MAX_IDX_GAP': 1.5},
-    {'name': 'EQ100_GAP2.0', 'RANGE_SLOW_SCORE_MODE': 'EQ100',  'RANGE_SLOW_MAX_IDX_GAP': 2.0},
-    {'name': 'GE97_5_GAP1.0','RANGE_SLOW_SCORE_MODE': 'GE97_5', 'RANGE_SLOW_MAX_IDX_GAP': 1.0},
-    {'name': 'GE97_5_GAP1.5','RANGE_SLOW_SCORE_MODE': 'GE97_5', 'RANGE_SLOW_MAX_IDX_GAP': 1.5},
-    {'name': 'GE97_5_GAP2.0','RANGE_SLOW_SCORE_MODE': 'GE97_5', 'RANGE_SLOW_MAX_IDX_GAP': 2.0},
+    {'name': 'EQ100_GAP1.0',  'RANGE_SLOW_SCORE_MODE': 'EQ100',  'RANGE_SLOW_MAX_IDX_GAP': 1.0},
+    {'name': 'EQ100_GAP1.5',  'RANGE_SLOW_SCORE_MODE': 'EQ100',  'RANGE_SLOW_MAX_IDX_GAP': 1.5},
+    {'name': 'EQ100_GAP2.0',  'RANGE_SLOW_SCORE_MODE': 'EQ100',  'RANGE_SLOW_MAX_IDX_GAP': 2.0},
+    {'name': 'GE97_5_GAP1.0', 'RANGE_SLOW_SCORE_MODE': 'GE97_5', 'RANGE_SLOW_MAX_IDX_GAP': 1.0},
+    {'name': 'GE97_5_GAP1.5', 'RANGE_SLOW_SCORE_MODE': 'GE97_5', 'RANGE_SLOW_MAX_IDX_GAP': 1.5},
+    {'name': 'GE97_5_GAP2.0', 'RANGE_SLOW_SCORE_MODE': 'GE97_5', 'RANGE_SLOW_MAX_IDX_GAP': 2.0},
 ]
 
 # =========================================================
@@ -106,6 +106,23 @@ WALKFORWARD_FOLDS = [
 ]
 
 LINE_SIZE = 4000.0
+
+
+# =========================================================
+# CHARGEMENT DES DONNEES (UNE SEULE FOIS)
+# =========================================================
+def load_market_data(cfg):
+    client = bigquery.Client(project=cfg['PROJECT'])
+    query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
+    df = client.query(query).to_dataframe()
+
+    df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
+
+    for c in ['Close', 'High', 'Low', 'Volume']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    return df
 
 
 # =========================================================
@@ -183,10 +200,8 @@ def v4_pivot_events(df: pd.DataFrame, w: int = 3):
         for j in range(i - w, i + w + 1):
             if j == i:
                 continue
-            if highs[j] >= highs[i]:
-                is_h = False
-            if lows[j] <= lows[i]:
-                is_l = False
+            if highs[j] >= highsis_h = False
+            if lows[j] <= lowsis_l = False
             if not is_h and not is_l:
                 break
 
@@ -214,8 +229,7 @@ def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
     struct_ok = np.zeros(n, dtype=bool)
 
     for i in range(n):
-        if visible_on[i]:
-            active.extend(visible_on[i])
+        if visible_onactive.extend(visible_on[i])
 
         p_last = active[-last_pivots:]
         h = [x for x in p_last if x['type'] == 'H']
@@ -632,16 +646,11 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 # =========================================================
 # BACKTEST GLOBAL
 # =========================================================
-def alpha4(cfg):
-    client = bigquery.Client(project=cfg['PROJECT'])
-    query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
-    df = client.query(query).to_dataframe()
-
-    df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
-
-    for c in ['Close', 'High', 'Low', 'Volume']:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
+def alpha4(cfg, base_df=None):
+    if base_df is None:
+        df = load_market_data(cfg)
+    else:
+        df = base_df.copy()
 
     idx_ticker = cfg['IDX']
     base_idx = df[df['Ticker'] == idx_ticker].copy().set_index('Date').sort_index()
@@ -685,7 +694,7 @@ def alpha4(cfg):
 
     return {
         'metadata': {
-            'system': 'Titanium walk-forward test harness',
+            'system': 'Titanium walk-forward test harness cached',
             'universe': len(universe),
             'exclude_tp135_slow': cfg.get('EXCLUDE_TP135_SLOW', False),
             'use_range_slow_context_filter': cfg.get('USE_RANGE_SLOW_CONTEXT_FILTER', False),
@@ -766,8 +775,21 @@ def compute_realized_dd(df_ledger: pd.DataFrame) -> float:
 
 
 def summarize_period(df_ledger: pd.DataFrame, start_year: int, end_year: int):
-    g = df_ledger[(pd.to_datetime(df_ledger['Vente']).dt.year >= start_year) &
-                  (pd.to_datetime(df_ledger['Vente']).dt.year <= end_year)].copy()
+    if df_ledger is None or len(df_ledger) == 0:
+        return {
+            'trades': 0,
+            'profit': 0.0,
+            'xirr': np.nan,
+            'dd': np.nan,
+            'tp': 0,
+            'be': 0,
+            'sl': 0,
+            'lock1': 0,
+            'profit_factor': np.nan
+        }
+
+    vente_year = pd.to_datetime(df_ledger['Vente']).dt.year
+    g = df_ledger[(vente_year >= start_year) & (vente_year <= end_year)].copy()
 
     if len(g) == 0:
         return {
@@ -826,56 +848,80 @@ def choose_best_variant(results_for_variants):
 
 
 # =========================================================
-# WALK-FORWARD
+# WALK-FORWARD AVEC CACHE
 # =========================================================
 def run_walkforward():
     all_fold_outputs = []
 
-    # baseline une fois par fold
+    # 1) Charger les données UNE SEULE FOIS
+    base_df = load_market_data(ALPHA4_CFG)
+
+    # 2) Calculer baseline + variantes UNE SEULE FOIS
+    run_cache = {}
+
+    # baseline
+    base_cfg = copy.deepcopy(ALPHA4_CFG)
+    base_cfg['USE_RANGE_SLOW_CONTEXT_FILTER'] = False
+    base_run = alpha4(base_cfg, base_df=base_df)
+    run_cache['BASELINE'] = {
+        'config': {
+            'use_filter': False,
+            'score_mode': None,
+            'max_idx_gap': None
+        },
+        'metadata': base_run['metadata'],
+        'ledger': pd.DataFrame(base_run['trades'])
+    }
+
+    # variantes
+    for var in VARIANTS:
+        cfg = copy.deepcopy(ALPHA4_CFG)
+        cfg['USE_RANGE_SLOW_CONTEXT_FILTER'] = True
+        cfg['RANGE_SLOW_SCORE_MODE'] = var['RANGE_SLOW_SCORE_MODE']
+        cfg['RANGE_SLOW_MAX_IDX_GAP'] = var['RANGE_SLOW_MAX_IDX_GAP']
+
+        run = alpha4(cfg, base_df=base_df)
+
+        run_cache[var['name']] = {
+            'config': {
+                'use_filter': True,
+                'score_mode': var['RANGE_SLOW_SCORE_MODE'],
+                'max_idx_gap': var['RANGE_SLOW_MAX_IDX_GAP']
+            },
+            'metadata': run['metadata'],
+            'ledger': pd.DataFrame(run['trades'])
+        }
+
+    # 3) Walk-forward à partir des ledgers déjà calculés
     for fold in WALKFORWARD_FOLDS:
         fold_name = fold['name']
         train_start = fold['train_start']
         train_end = fold['train_end']
         test_year = fold['test_year']
 
+        baseline_ledger = run_cache['BASELINE']['ledger']
+        baseline_train = summarize_period(baseline_ledger, train_start, train_end)
+        baseline_test = summarize_period(baseline_ledger, test_year, test_year)
+
         variant_results = []
 
-        # baseline sans filtre additionnel 10+SLOW
-        base_cfg = copy.deepcopy(ALPHA4_CFG)
-        base_cfg['USE_RANGE_SLOW_CONTEXT_FILTER'] = False
-        base_run = alpha4(base_cfg)
-        base_ledger = pd.DataFrame(base_run['trades'])
-
-        baseline_train = summarize_period(base_ledger, train_start, train_end)
-        baseline_test = summarize_period(base_ledger, test_year, test_year)
-
-        # variantes
         for var in VARIANTS:
-            cfg = copy.deepcopy(ALPHA4_CFG)
-            cfg['USE_RANGE_SLOW_CONTEXT_FILTER'] = True
-            cfg['RANGE_SLOW_SCORE_MODE'] = var['RANGE_SLOW_SCORE_MODE']
-            cfg['RANGE_SLOW_MAX_IDX_GAP'] = var['RANGE_SLOW_MAX_IDX_GAP']
-
-            run = alpha4(cfg)
-            ledger = pd.DataFrame(run['trades'])
+            variant_name = var['name']
+            ledger = run_cache[variant_name]['ledger']
 
             train_metrics = summarize_period(ledger, train_start, train_end)
             test_metrics = summarize_period(ledger, test_year, test_year)
 
             variant_results.append({
-                'variant_name': var['name'],
-                'config': {
-                    'score_mode': var['RANGE_SLOW_SCORE_MODE'],
-                    'max_idx_gap': var['RANGE_SLOW_MAX_IDX_GAP']
-                },
-                'metadata': run['metadata'],
+                'variant_name': variant_name,
+                'config': run_cache[variant_name]['config'],
+                'metadata': run_cache[variant_name]['metadata'],
                 'train_metrics': train_metrics,
                 'test_metrics': test_metrics
             })
 
         best_variant = choose_best_variant(variant_results)
 
-        # lecture OOS du meilleur variant vs baseline
         fold_output = {
             'fold': fold_name,
             'train_period': f'{train_start}-{train_end}',
@@ -893,8 +939,39 @@ def run_walkforward():
     return all_fold_outputs
 
 
+# =========================================================
+# SORTIE RESUMEE POUR EVITER UN JSON TROP GROS
+# =========================================================
+def build_compact_summary(wf_results):
+    summary = []
+    for fold in wf_results:
+        summary.append({
+            'fold': fold['fold'],
+            'train_period': fold['train_period'],
+            'test_period': fold['test_period'],
+            'baseline_test': fold['baseline']['test'],
+            'selected_variant': {
+                'variant_name': fold['selected_variant']['variant_name'],
+                'config': fold['selected_variant']['config'],
+                'metadata': {
+                    'total_skipped_range_slow_context': fold['selected_variant']['metadata'].get('total_skipped_range_slow_context'),
+                    'total_skipped_tp135_slow': fold['selected_variant']['metadata'].get('total_skipped_tp135_slow')
+                },
+                'train_metrics': fold['selected_variant']['train_metrics'],
+                'test_metrics': fold['selected_variant']['test_metrics']
+            }
+        })
+    return summary
+
+
 if __name__ == '__main__':
     wf = run_walkforward()
-    print(json.dumps(wf, indent=2, ensure_ascii=False, default=str))
 
-# ==== END walkforward_sigma2.py ====
+    # Résumé compact (recommandé pour éviter le timeout / JSON géant)
+    compact = build_compact_summary(wf)
+    print(json.dumps(compact, indent=2, ensure_ascii=False, default=str))
+
+    # Si tu veux le JSON complet, décommente la ligne ci-dessous :
+    # print(json.dumps(wf, indent=2, ensure_ascii=False, default=str))
+
+# ==== END walkforward_sigma2_cached.py ====
