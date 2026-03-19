@@ -11,11 +11,6 @@ ALPHA4_CFG = {
     'TBL': 'CC_Historique_Cours_v2',
     'IDX': '^FCHI',
 
-    # --- Benchmark mode ---
-    'BENCH_MODE': 'FCHI',          # 'FCHI' | 'EW_POOL' | 'EW_POOL_EX_SELF'
-    'BENCH_MIN_MEMBERS': 20,
-    'BENCH_BASE_VALUE': 100.0,
-    
     # --- Moteur principal ---
     'MKT_FILTER': True,
     'SMA_P': 100,
@@ -79,50 +74,6 @@ ALPHA4_CFG = {
     # --- Univers ---
     'UNIVERSE': None
 }
-
-# ===========================
-# CALCUL INDEX PERSO
-# ===========================
-def build_equal_weight_index(close_wide: pd.DataFrame,
-                             min_members: int = 20,
-                             base_value: float = 100.0) -> pd.Series:
-    close_wide = close_wide.sort_index().copy()
-    rets = close_wide.pct_change()
-
-    counts = rets.notna().sum(axis=1)
-    ew_ret = rets.mean(axis=1, skipna=True)
-    ew_ret[counts < min_members] = np.nan
-
-    ew_index = (1.0 + ew_ret.fillna(0.0)).cumprod() * base_value
-    ew_index.name = 'EW_POOL_INDEX'
-    return ew_index
-
-
-def build_equal_weight_index_ex_self(close_wide: pd.DataFrame,
-                                     ticker_to_exclude: str,
-                                     min_members: int = 20,
-                                     base_value: float = 100.0) -> pd.Series:
-    close_wide = close_wide.sort_index().copy()
-    rets = close_wide.pct_change()
-
-    if ticker_to_exclude not in rets.columns:
-        return build_equal_weight_index(close_wide, min_members=min_members, base_value=base_value)
-
-    counts = rets.notna().sum(axis=1)
-    sum_ret = rets.sum(axis=1, skipna=True)
-
-    excl_ret = rets[ticker_to_exclude]
-    excl_present = excl_ret.notna().astype(int)
-
-    denom = counts - excl_present
-    numer = sum_ret - excl_ret.fillna(0.0)
-
-    ew_ex_ret = numer / denom.replace(0, np.nan)
-    ew_ex_ret[denom < min_members] = np.nan
-
-    ew_ex_index = (1.0 + ew_ex_ret.fillna(0.0)).cumprod() * base_value
-    ew_ex_index.name = f"EW_POOL_EX_{ticker_to_exclude}"
-    return ew_ex_index
 
 
 # ===========================
@@ -581,32 +532,15 @@ def alpha4(cfg):
             df[c] = pd.to_numeric(df[c], errors='coerce')
 
     idx_ticker = cfg['IDX']
+    base_idx = df[df['Ticker'] == idx_ticker].copy().set_index('Date').sort_index()
+    idx_close = base_idx['Close']
+
+    idx_sma = idx_close.rolling(cfg['SMA_P'], min_periods=cfg['SMA_P']).mean()
+    idx_slope = ((idx_sma - idx_sma.shift(4)) / idx_sma.shift(4)).fillna(0)
 
     universe = [t for t in sorted(df['Ticker'].dropna().unique()) if t != idx_ticker]
     if cfg['UNIVERSE']:
         universe = [t for t in universe if t in cfg['UNIVERSE']]
-
-    bench_mode = cfg.get('BENCH_MODE', 'FCHI')
-    bench_min_members = int(cfg.get('BENCH_MIN_MEMBERS', 20))
-    bench_base_value = float(cfg.get('BENCH_BASE_VALUE', 100.0))
-
-    # baseline FCHI
-    base_idx = df[df['Ticker'] == idx_ticker].copy().set_index('Date').sort_index()
-    fchi_close = base_idx['Close']
-
-    # close_wide du pool réel (hors FCHI)
-    pool_df = df[df['Ticker'].isin(universe)].copy()
-    close_wide = (
-        pool_df.pivot_table(index='Date', columns='Ticker', values='Close', aggfunc='last')
-        .sort_index()
-    )
-
-    # indice équipondéré global
-    ew_pool_close = build_equal_weight_index(
-        close_wide,
-        min_members=bench_min_members,
-        base_value=bench_base_value
-    )
 
     portfolio_trades = []
     portfolio_open_positions = []
@@ -618,29 +552,6 @@ def alpha4(cfg):
 
         if len(d) < 100:
             continue
-
-        # ---------------------------
-        # idx_close dynamique
-        # ---------------------------
-        if bench_mode == 'FCHI':
-            idx_close = fchi_close
-
-        elif bench_mode == 'EW_POOL':
-            idx_close = ew_pool_close
-
-        elif bench_mode == 'EW_POOL_EX_SELF':
-            idx_close = build_equal_weight_index_ex_self(
-                close_wide=close_wide,
-                ticker_to_exclude=t,
-                min_members=bench_min_members,
-                base_value=bench_base_value
-            )
-
-        else:
-            raise ValueError(f"BENCH_MODE inconnu: {bench_mode}")
-
-        idx_sma = idx_close.rolling(cfg['SMA_P'], min_periods=cfg['SMA_P']).mean()
-        idx_slope = ((idx_sma - idx_sma.shift(4)) / idx_sma.shift(4)).fillna(0)
 
         stats, trades, open_trade = _v4_run_ticker(
             d,
@@ -658,12 +569,14 @@ def alpha4(cfg):
 
     df_ledger = pd.DataFrame(portfolio_trades)
 
+    total_skipped = int(sum(v.get('skipped_tp135_slow', 0) for v in per_ticker_stats.values()))
+
     return {
         'metadata': {
-            'system': 'Titanium v6 + benchmark_mode',
+            'system': 'Titanium v6 + exclude TP13.5 SLOW + profit_lock',
             'universe': len(universe),
-            'bench_mode': bench_mode,
-            'bench_min_members': bench_min_members
+            'exclude_tp135_slow': cfg.get('EXCLUDE_TP135_SLOW', False),
+            'total_skipped_tp135_slow': total_skipped
         },
         'portfolio': {
             'gain_total': float(df_ledger['Gain'].sum()) if len(df_ledger) else 0.0,
@@ -680,4 +593,3 @@ if __name__ == '__main__':
     out = alpha4(ALPHA4_CFG)
     print(json.dumps(out, indent=2, ensure_ascii=False))
 # ==== END sigma2.py f
-
