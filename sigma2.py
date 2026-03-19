@@ -5,6 +5,7 @@ import pandas as pd
 from google.cloud import bigquery
 
 ALPHA4_CFG = {
+    # --- Configuration Backend ---
     'PROJECT': 'project-16c606d0-6527-4644-907',
     'DB_SET': 'Trading',
     'TBL': 'CC_Historique_Cours_v2',
@@ -14,11 +15,9 @@ ALPHA4_CFG = {
     'MKT_FILTER': True,
     'SMA_P': 100,
     'LOOKBACK': 63,
-    'MIN_SCORE': 86,
 
-    # --- RS / vélocité ---
-    'USE_RS_SMA_FILTER': False,   # false = ton gold standard actuel
-    'RS_SMA_P': 20,
+    # --- Cœur de la stratégie ---
+    'MIN_SCORE': 86,
 
     # --- Pondérations score ---
     'W_STRUCT': 30,
@@ -30,6 +29,10 @@ ALPHA4_CFG = {
     # --- Pénalité / disqualification ---
     'PENALTY_MM20': -10,
     'FORCE_RS_POSITIVE': True,
+
+    # --- Filtre vélocité ---
+    'USE_RS_SMA_FILTER': False,
+    'RS_SMA_P': 20,
 
     # --- Filtre tendance titre ---
     'USE_PRICE_SMA_FILTER': True,
@@ -50,14 +53,10 @@ ALPHA4_CFG = {
 
     # --- Profit Lock ---
     'USE_PROFIT_LOCK': True,
-
-    # Palier 1 : MFE >= 8% => on verrouille ~ +1.5% net
-    'LOCK1_TRIGGER': 0.08,
-    'LOCK1_RAW': 0.0206,   # FEES + 0.015
-
-    # Palier 2 : MFE >= 10% => on verrouille ~ +3.0% net
-    'LOCK2_TRIGGER': 0.10,
-    'LOCK2_RAW': 0.0356,   # FEES + 0.030
+    'LOCK1_TRIGGER': 0.095,
+    'LOCK1_RAW': 0.0206,
+    'LOCK2_TRIGGER': 999.0,
+    'LOCK2_RAW': 0.0356,
 
     # --- Gestion risque & frais ---
     'ATR_P': 50,
@@ -69,21 +68,18 @@ ALPHA4_CFG = {
     'PIVOT_W': 3,
     'STRUCT_LAST_PIVOTS': 15,
 
+    # --- Nouveau filtre régime ---
+    'EXCLUDE_TP135_SLOW': True,
+
     # --- Univers ---
     'UNIVERSE': None
 }
+
 
 # ===========================
 # Indicateurs (parité GAS)
 # ===========================
 def v4_rs_line(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
-    """
-    RS alignée GAS :
-    - besoin d'au moins 63 barres côté titre
-    - stock_perf = close[t] vs close[t-62]
-    - indice : dernier close <= date du titre, puis 62 barres plus tôt
-    - RS = (stock_perf - idx_perf) * 100
-    """
     stock_close = pd.to_numeric(stock_close, errors='coerce').sort_index()
     idx_close = pd.to_numeric(idx_close, errors='coerce').sort_index()
 
@@ -125,9 +121,6 @@ def v4_rs_line(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
 
 
 def v4_rsi(close: pd.Series, p: int = 14) -> pd.Series:
-    """
-    RSI façon GAS (somme gains/pertes sur p barres ; pertes==0 -> 100)
-    """
     close = pd.to_numeric(close, errors='coerce')
     diff = close.diff()
 
@@ -145,11 +138,6 @@ def v4_rsi(close: pd.Series, p: int = 14) -> pd.Series:
 
 
 def v4_pivot_events(df: pd.DataFrame, w: int = 3):
-    """
-    Pivots stricts comme GAS :
-    - H si aucun voisin (i-w..i+w, hors i) n'a high >= high[i]
-    - L si aucun voisin (i-w..i+w, hors i) n'a low <= low[i]
-    """
     highs = pd.to_numeric(df['High'], errors='coerce').to_numpy(dtype=float)
     lows = pd.to_numeric(df['Low'], errors='coerce').to_numpy(dtype=float)
 
@@ -179,12 +167,6 @@ def v4_pivot_events(df: pd.DataFrame, w: int = 3):
 
 
 def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
-    """
-    Structure GAS :
-    - un pivot détecté à k devient visible à k+w
-    - à chaque date i, on prend les pivots visibles, on slice(-last_pivots)
-    - HH/LH sur les deux derniers H ; HL/LL sur les deux derniers L
-    """
     df = df.sort_index().copy()
     n = len(df)
     piv = v4_pivot_events(df, w=w)
@@ -228,9 +210,6 @@ def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
 
 
 def v4_squeeze_flag(df: pd.DataFrame) -> pd.Series:
-    """
-    2*std20(population) < 1.5*avg20(high-low)
-    """
     close = pd.to_numeric(df['Close'], errors='coerce')
     hl = pd.to_numeric(df['High'], errors='coerce') - pd.to_numeric(df['Low'], errors='coerce')
     std20 = close.rolling(20, min_periods=20).std(ddof=0)
@@ -339,6 +318,8 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
         cfg.get('PRICE_SMA_P', 200) if cfg.get('USE_PRICE_SMA_FILTER', False) else 0
     )
 
+    skipped_tp135_slow = 0
+
     # --- Boucle simulation ---
     for date in stock_df.index[start_i:]:
         row = stock_df.loc[date]
@@ -372,7 +353,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 if active_trade['mfe_pct'] >= cfg.get('LOCK2_TRIGGER', 0.10):
                     active_trade['profit_lock_raw'] = cfg.get('LOCK2_RAW', 0.0356)
                     active_trade['profit_lock_level'] = 'LOCK2'
-                elif active_trade['mfe_pct'] >= cfg.get('LOCK1_TRIGGER', 0.08):
+                elif active_trade['mfe_pct'] >= cfg.get('LOCK1_TRIGGER', 0.095):
                     if active_trade['profit_lock_raw'] is None:
                         active_trade['profit_lock_raw'] = cfg.get('LOCK1_RAW', 0.0206)
                         active_trade['profit_lock_level'] = 'LOCK1'
@@ -426,7 +407,8 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
                     # --- Profit Lock ---
                     'Profit_Lock_Level': active_trade.get('profit_lock_level', None),
-                    'Profit_Lock_Raw_Pct': round(active_trade['profit_lock_raw'] * 100, 2) if active_trade.get('profit_lock_raw') is not None else None
+                    'Profit_Lock_Raw_Pct': round(active_trade['profit_lock_raw'] * 100, 2)
+                    if active_trade.get('profit_lock_raw') is not None else None
                 })
 
                 active_trade = None
@@ -459,6 +441,16 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
             is_fast_be = (slope >= 0.004 and vol_pct < cfg['VOL_LIM'])
             current_be_trig = cfg['BE_F'] if is_fast_be else cfg['BE_S']
+
+            # ======================================================
+            # Filtre demandé : exclure TP13.5 + SLOW
+            # ======================================================
+            if cfg.get('EXCLUDE_TP135_SLOW', False):
+                is_tp_135 = abs(current_tp - cfg['TP_TREND']) < 1e-12
+                is_slow = not is_fast_be
+                if is_tp_135 and is_slow:
+                    skipped_tp135_slow += 1
+                    continue
 
             active_trade = {
                 'date': date,
@@ -510,14 +502,16 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
             # --- Profit lock ---
             'Profit_Lock_Level': active_trade.get('profit_lock_level', None),
-            'Profit_Lock_Raw_Pct': round(active_trade['profit_lock_raw'] * 100, 2) if active_trade.get('profit_lock_raw') is not None else None
+            'Profit_Lock_Raw_Pct': round(active_trade['profit_lock_raw'] * 100, 2)
+            if active_trade.get('profit_lock_raw') is not None else None
         }
 
     df_ledger = pd.DataFrame(ledger)
     stats = {
         'nb_trades': int(len(df_ledger)),
         'gain_total': float(df_ledger['Gain'].sum()) if len(df_ledger) else 0.0,
-        'win_rate': float((df_ledger['Gain'] > 0).mean()) if len(df_ledger) else 0.0
+        'win_rate': float((df_ledger['Gain'] > 0).mean()) if len(df_ledger) else 0.0,
+        'skipped_tp135_slow': int(skipped_tp135_slow)
     }
 
     return stats, ledger, open_trade
@@ -575,10 +569,14 @@ def alpha4(cfg):
 
     df_ledger = pd.DataFrame(portfolio_trades)
 
+    total_skipped = int(sum(v.get('skipped_tp135_slow', 0) for v in per_ticker_stats.values()))
+
     return {
         'metadata': {
-            'system': 'Titanium v4.2 + logging + profit_lock',
-            'universe': len(universe)
+            'system': 'Titanium v6 + exclude TP13.5 SLOW + profit_lock',
+            'universe': len(universe),
+            'exclude_tp135_slow': cfg.get('EXCLUDE_TP135_SLOW', False),
+            'total_skipped_tp135_slow': total_skipped
         },
         'portfolio': {
             'gain_total': float(df_ledger['Gain'].sum()) if len(df_ledger) else 0.0,
@@ -594,4 +592,5 @@ def alpha4(cfg):
 if __name__ == '__main__':
     out = alpha4(ALPHA4_CFG)
     print(json.dumps(out, indent=2, ensure_ascii=False))
-# ==== END sigma2.py
+# ==== END sigma2.py f
+
