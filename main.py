@@ -11,7 +11,7 @@ app = Flask(__name__)
 @app.route("/run_test2", methods=["GET"])
 def run_test2():
     try:
-        result = sigma.run_walkforward()
+        result = sigma2.run_walkforward()
         return jsonify(result)
     except Exception as e:
         return jsonify({"status":"error", "message": str(e)})
