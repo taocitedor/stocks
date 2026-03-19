@@ -68,13 +68,12 @@ ALPHA4_CFG = {
     'PIVOT_W': 3,
     'STRUCT_LAST_PIVOTS': 15,
 
-    # --- Nouveau filtre régime ---
+    # --- Filtre régime ---
     'EXCLUDE_TP135_SLOW': True,
 
     # --- Univers ---
     'UNIVERSE': None
 }
-
 
 # ===========================
 # Indicateurs (parité GAS)
@@ -199,7 +198,6 @@ def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
             + '+'
             + ('HL' if l[-1]['value'] > l[-2]['value'] else 'LL')
         )
-
         struct_label[i] = label
         struct_ok[i] = ('HH' in label and 'HL' in label)
 
@@ -277,7 +275,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
     # --- Score ---
     s_val = pd.Series(0.0, index=stock_df.index)
-
     s_val += np.where(struct_ok, cfg['W_STRUCT'], 0)
     s_val += np.where(sqz_flag, cfg['W_SQZ'], 0)
     s_val += np.where(
@@ -385,6 +382,21 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 else:
                     active_trade['bars_to_sl'] = active_trade['bars_held']
 
+                # --- benchmark à la sortie ---
+                idx_exit_px = idx_close.reindex(stock_df.index).loc[date]
+
+                idx_return_trade_pct = None
+                excess_return_vs_idx_pct = None
+                stock_return_trade_pct = (raw_exit - cfg['FEES']) * 100.0
+
+                if (
+                    active_trade.get('idx_entry_px') is not None
+                    and pd.notna(idx_exit_px)
+                    and active_trade['idx_entry_px'] != 0
+                ):
+                    idx_return_trade_pct = ((float(idx_exit_px) / float(active_trade['idx_entry_px'])) - 1.0) * 100.0
+                    excess_return_vs_idx_pct = stock_return_trade_pct - idx_return_trade_pct
+
                 ledger.append({
                     'Ticker': stock_df.attrs.get('Ticker', 'NA'),
                     'Achat': active_trade['date'].strftime('%Y-%m-%d'),
@@ -393,7 +405,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     'Type': trade_type,
                     'Bars': active_trade['bars_held'],
 
-                    # --- Logging analytique ---
+                    # --- Logging analytique existant ---
                     'MFE_Pct': round(active_trade['mfe_pct'] * 100, 2),
                     'MAE_Pct': round(active_trade['mae_pct'] * 100, 2),
                     'Max_Close_Pct': round(active_trade['max_close_pct'] * 100, 2),
@@ -405,10 +417,51 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     'BE_Assigned_Pct': round(active_trade['be_trig'] * 100, 2),
                     'BE_Type': active_trade['be_type'],
 
-                    # --- Profit Lock ---
+                    # --- Profit Lock existant ---
                     'Profit_Lock_Level': active_trade.get('profit_lock_level', None),
                     'Profit_Lock_Raw_Pct': round(active_trade['profit_lock_raw'] * 100, 2)
-                    if active_trade.get('profit_lock_raw') is not None else None
+                    if active_trade.get('profit_lock_raw') is not None else None,
+
+                    # ======================================================
+                    # NOUVEAUX CHAMPS D'ANALYSE A L'ENTREE
+                    # ======================================================
+                    'Score_Entry': round(active_trade['score_entry'], 2),
+                    'RS_Line_Entry': round(active_trade['rs_line_entry'], 2),
+                    'RS_SMA_Entry': round(active_trade['rs_sma_entry'], 2)
+                    if active_trade['rs_sma_entry'] is not None else None,
+                    'RS_Momentum_OK_Entry': active_trade['rs_momentum_ok_entry'],
+                    'RSI_Entry': round(active_trade['rsi_entry'], 2),
+                    'Volume_Ratio_Entry': round(active_trade['volume_ratio_entry'], 3),
+                    'Dist_M20_Entry_Pct': round(active_trade['dist_m20_entry_pct'], 2),
+                    'Squeeze_Flag_Entry': active_trade['squeeze_flag_entry'],
+                    'Structure_Label_Entry': active_trade['structure_label_entry'],
+                    'Structure_OK_Entry': active_trade['structure_ok_entry'],
+                    'Price_Filter_OK_Entry': active_trade['price_filter_ok_entry'],
+                    'Price_vs_SMA200_Entry_Pct': round(active_trade['price_vs_sma200_entry_pct'], 2)
+                    if active_trade['price_vs_sma200_entry_pct'] is not None else None,
+
+                    'Idx_Close_Entry': round(active_trade['idx_entry_px'], 2)
+                    if active_trade['idx_entry_px'] is not None else None,
+                    'Idx_SMA_Entry': round(active_trade['idx_entry_sma'], 2)
+                    if active_trade['idx_entry_sma'] is not None else None,
+                    'Idx_Gap_vs_SMA_Entry_Pct': round(active_trade['idx_gap_vs_sma_entry_pct'], 3)
+                    if active_trade['idx_gap_vs_sma_entry_pct'] is not None else None,
+                    'Idx_Slope_Entry_Pct': round(active_trade['idx_slope_entry_pct'], 3)
+                    if active_trade['idx_slope_entry_pct'] is not None else None,
+                    'Mkt_Filter_OK_Entry': active_trade['mkt_filter_ok_entry'],
+
+                    'Vol_Pct_Entry': round(active_trade['vol_pct_entry'], 3),
+                    'Is_FAST_BE_Entry': active_trade['is_fast_be_entry'],
+                    'Is_Strong_Trend_Entry': active_trade['is_strong_trend_entry'],
+                    'TP_Regime_Source': active_trade['tp_regime_source'],
+
+                    # ======================================================
+                    # PERFORMANCE RELATIVE AU BENCHMARK
+                    # ======================================================
+                    'Idx_Close_Exit': round(float(idx_exit_px), 2) if pd.notna(idx_exit_px) else None,
+                    'Stock_Return_Trade_Pct': round(stock_return_trade_pct, 2),
+                    'Idx_Return_Trade_Pct': round(idx_return_trade_pct, 2) if idx_return_trade_pct is not None else None,
+                    'Excess_Return_vs_Idx_Pct': round(excess_return_vs_idx_pct, 2) if excess_return_vs_idx_pct is not None else None
                 })
 
                 active_trade = None
@@ -452,6 +505,27 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     skipped_tp135_slow += 1
                     continue
 
+            # --- enrichissement contexte d'entrée ---
+            tp_regime_source = 'TREND'
+            if is_strong:
+                tp_regime_source = 'TREND_BOOST'
+            if slope < cfg['SLOPE_TRESH']:
+                tp_regime_source = 'RANGE'
+
+            idx_entry_px = idx_close.reindex(stock_df.index).loc[date]
+            idx_entry_sma = idx_sma_on_stock_dates.reindex(stock_df.index).loc[date]
+
+            idx_gap_vs_sma_pct = None
+            if pd.notna(idx_entry_px) and pd.notna(idx_entry_sma) and idx_entry_sma != 0:
+                idx_gap_vs_sma_pct = ((float(idx_entry_px) / float(idx_entry_sma)) - 1.0) * 100.0
+
+            price_sma_entry = price_sma.loc[date] if date in price_sma.index else np.nan
+            price_vs_sma200_pct = None
+            if pd.notna(price_sma_entry) and price_sma_entry != 0:
+                price_vs_sma200_pct = ((float(row['Close']) / float(price_sma_entry)) - 1.0) * 100.0
+
+            rs_sma_entry = rs_sma.loc[date] if date in rs_sma.index else np.nan
+
             active_trade = {
                 'date': date,
                 'e_px': float(row['Close']),
@@ -465,14 +539,41 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 'profit_lock_raw': None,
                 'profit_lock_level': None,
 
-                # --- Logging analytique ---
+                # --- Logging analytique existant ---
                 'mfe_pct': 0.0,
                 'mae_pct': 0.0,
                 'max_close_pct': 0.0,
                 'min_close_pct': 0.0,
                 'bars_to_be': None,
                 'bars_to_tp': None,
-                'bars_to_sl': None
+                'bars_to_sl': None,
+
+                # ======================================================
+                # NOUVEAUX CHAMPS D'ANALYSE A L'ENTREE
+                # ======================================================
+                'score_entry': float(score.loc[date]),
+                'rs_line_entry': float(rs_line.loc[date]),
+                'rs_sma_entry': float(rs_sma_entry) if pd.notna(rs_sma_entry) else None,
+                'rs_momentum_ok_entry': bool(rs_momentum_ok.loc[date]),
+                'rsi_entry': float(rsi.loc[date]),
+                'volume_ratio_entry': float(vratio.loc[date]),
+                'dist_m20_entry_pct': float(dist_m20.loc[date] * 100.0),
+                'squeeze_flag_entry': bool(sqz_flag.loc[date]),
+                'structure_label_entry': struct_label.loc[date],
+                'structure_ok_entry': bool(struct_ok.loc[date]),
+                'price_filter_ok_entry': bool(price_filter_ok.loc[date]),
+                'price_vs_sma200_entry_pct': float(price_vs_sma200_pct) if price_vs_sma200_pct is not None else None,
+
+                'idx_entry_px': float(idx_entry_px) if pd.notna(idx_entry_px) else None,
+                'idx_entry_sma': float(idx_entry_sma) if pd.notna(idx_entry_sma) else None,
+                'idx_gap_vs_sma_entry_pct': float(idx_gap_vs_sma_pct) if idx_gap_vs_sma_pct is not None else None,
+                'idx_slope_entry_pct': float(slope * 100.0) if pd.notna(slope) else None,
+                'mkt_filter_ok_entry': bool(mkt_ok.loc[date]),
+
+                'vol_pct_entry': float(vol_pct * 100.0),
+                'is_fast_be_entry': bool(is_fast_be),
+                'is_strong_trend_entry': bool(is_strong),
+                'tp_regime_source': tp_regime_source
             }
 
     # --- Trade en cours ---
@@ -507,6 +608,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
         }
 
     df_ledger = pd.DataFrame(ledger)
+
     stats = {
         'nb_trades': int(len(df_ledger)),
         'gain_total': float(df_ledger['Gain'].sum()) if len(df_ledger) else 0.0,
@@ -533,8 +635,8 @@ def alpha4(cfg):
 
     idx_ticker = cfg['IDX']
     base_idx = df[df['Ticker'] == idx_ticker].copy().set_index('Date').sort_index()
-    idx_close = base_idx['Close']
 
+    idx_close = base_idx['Close']
     idx_sma = idx_close.rolling(cfg['SMA_P'], min_periods=cfg['SMA_P']).mean()
     idx_slope = ((idx_sma - idx_sma.shift(4)) / idx_sma.shift(4)).fillna(0)
 
@@ -568,12 +670,11 @@ def alpha4(cfg):
             portfolio_open_positions.append(open_trade)
 
     df_ledger = pd.DataFrame(portfolio_trades)
-
     total_skipped = int(sum(v.get('skipped_tp135_slow', 0) for v in per_ticker_stats.values()))
 
     return {
         'metadata': {
-            'system': 'Titanium v6 + exclude TP13.5 SLOW + profit_lock',
+            'system': 'Titanium v7 + exclude TP13.5 SLOW + enriched trade detail',
             'universe': len(universe),
             'exclude_tp135_slow': cfg.get('EXCLUDE_TP135_SLOW', False),
             'total_skipped_tp135_slow': total_skipped
@@ -592,4 +693,5 @@ def alpha4(cfg):
 if __name__ == '__main__':
     out = alpha4(ALPHA4_CFG)
     print(json.dumps(out, indent=2, ensure_ascii=False))
-# ==== END sigma2.py f
+
+# ==== END sigma2.py
