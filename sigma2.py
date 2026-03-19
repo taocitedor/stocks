@@ -1,4 +1,4 @@
-# ==== START walkforward_sigma2_cached.py ====
+# ==== START sigma2.py ====
 import json
 import copy
 import numpy as np
@@ -72,10 +72,11 @@ ALPHA4_CFG = {
     'PIVOT_W': 3,
     'STRUCT_LAST_PIVOTS': 15,
 
-    # --- Filtre régime déjà utilisé ---
+    # --- Filtre régime déjà validé ---
     'EXCLUDE_TP135_SLOW': True,
 
-    # --- Filtre 10 + SLOW walk-forward (piloté par les variantes) ---
+    # --- Filtre 10 + SLOW walk-forward ---
+    # Laisser False ici : le walk-forward active les variantes lui-même.
     'USE_RANGE_SLOW_CONTEXT_FILTER': False,
     'RANGE_SLOW_SCORE_MODE': 'EQ100',   # 'EQ100' ou 'GE97_5'
     'RANGE_SLOW_MAX_IDX_GAP': 1.5,      # 1.0 / 1.5 / 2.0
@@ -200,8 +201,10 @@ def v4_pivot_events(df: pd.DataFrame, w: int = 3):
         for j in range(i - w, i + w + 1):
             if j == i:
                 continue
-            if highs[j] >= highsis_h = False
-            if lows[j] <= lowsis_l = False
+            if highs[j] >= highs[i]:
+                is_h = False
+            if lows[j] <= lows[i]:
+                is_l = False
             if not is_h and not is_l:
                 break
 
@@ -229,7 +232,8 @@ def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
     struct_ok = np.zeros(n, dtype=bool)
 
     for i in range(n):
-        if visible_onactive.extend(visible_on[i])
+        if visible_on[i]:
+            active.extend(visible_on[i])
 
         p_last = active[-last_pivots:]
         h = [x for x in p_last if x['type'] == 'H']
@@ -245,6 +249,7 @@ def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
             + '+'
             + ('HL' if l[-1]['value'] > l[-2]['value'] else 'LL')
         )
+
         struct_label[i] = label
         struct_ok[i] = ('HH' in label and 'HL' in label)
 
@@ -967,11 +972,11 @@ def build_compact_summary(wf_results):
 if __name__ == '__main__':
     wf = run_walkforward()
 
-    # Résumé compact (recommandé pour éviter le timeout / JSON géant)
+    # Résumé compact recommandé
     compact = build_compact_summary(wf)
     print(json.dumps(compact, indent=2, ensure_ascii=False, default=str))
 
-    # Si tu veux le JSON complet, décommente la ligne ci-dessous :
+    # Si tu veux le JSON complet, décommente :
     # print(json.dumps(wf, indent=2, ensure_ascii=False, default=str))
 
-# ==== END walkforward_sigma2_cached.py ====
+# ==== END sigma2.py ====
