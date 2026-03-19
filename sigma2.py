@@ -1,9 +1,13 @@
-# ==== START sigma2.py
+# ==== START walkforward_sigma2.py ====
 import json
+import copy
 import numpy as np
 import pandas as pd
 from google.cloud import bigquery
 
+# =========================================================
+# CONFIG DE BASE (reprend l'esprit de ton moteur actuel)
+# =========================================================
 ALPHA4_CFG = {
     # --- Configuration Backend ---
     'PROJECT': 'project-16c606d0-6527-4644-907',
@@ -68,16 +72,45 @@ ALPHA4_CFG = {
     'PIVOT_W': 3,
     'STRUCT_LAST_PIVOTS': 15,
 
-    # --- Filtre régime ---
+    # --- Filtre régime déjà validé dans ta base ---
     'EXCLUDE_TP135_SLOW': True,
+
+    # --- Filtre 10 + SLOW walk-forward ---
+    'USE_RANGE_SLOW_CONTEXT_FILTER': False,
+    'RANGE_SLOW_SCORE_MODE': 'EQ100',   # 'EQ100' ou 'GE97_5'
+    'RANGE_SLOW_MAX_IDX_GAP': 1.5,      # 1.0 / 1.5 / 2.0
 
     # --- Univers ---
     'UNIVERSE': None
 }
 
-# ===========================
-# Indicateurs (parité GAS)
-# ===========================
+# =========================================================
+# VARIANTES A TESTER (fixées d'avance)
+# =========================================================
+VARIANTS = [
+    {'name': 'EQ100_GAP1.0', 'RANGE_SLOW_SCORE_MODE': 'EQ100',  'RANGE_SLOW_MAX_IDX_GAP': 1.0},
+    {'name': 'EQ100_GAP1.5', 'RANGE_SLOW_SCORE_MODE': 'EQ100',  'RANGE_SLOW_MAX_IDX_GAP': 1.5},
+    {'name': 'EQ100_GAP2.0', 'RANGE_SLOW_SCORE_MODE': 'EQ100',  'RANGE_SLOW_MAX_IDX_GAP': 2.0},
+    {'name': 'GE97_5_GAP1.0','RANGE_SLOW_SCORE_MODE': 'GE97_5', 'RANGE_SLOW_MAX_IDX_GAP': 1.0},
+    {'name': 'GE97_5_GAP1.5','RANGE_SLOW_SCORE_MODE': 'GE97_5', 'RANGE_SLOW_MAX_IDX_GAP': 1.5},
+    {'name': 'GE97_5_GAP2.0','RANGE_SLOW_SCORE_MODE': 'GE97_5', 'RANGE_SLOW_MAX_IDX_GAP': 2.0},
+]
+
+# =========================================================
+# FOLDS WALK-FORWARD
+# =========================================================
+WALKFORWARD_FOLDS = [
+    {'name': 'WF_1', 'train_start': 2019, 'train_end': 2022, 'test_year': 2023},
+    {'name': 'WF_2', 'train_start': 2019, 'train_end': 2023, 'test_year': 2024},
+    {'name': 'WF_3', 'train_start': 2019, 'train_end': 2024, 'test_year': 2025},
+]
+
+LINE_SIZE = 4000.0
+
+
+# =========================================================
+# INDICATEURS
+# =========================================================
 def v4_rs_line(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
     stock_close = pd.to_numeric(stock_close, errors='coerce').sort_index()
     idx_close = pd.to_numeric(idx_close, errors='coerce').sort_index()
@@ -229,9 +262,9 @@ def v4_true_range(df: pd.DataFrame) -> pd.Series:
     return tr
 
 
-# ===========================
-# Moteur par ticker
-# ===========================
+# =========================================================
+# BACKTEST PAR TICKER
+# =========================================================
 def _v4_run_ticker(stock_df: pd.DataFrame,
                    idx_close: pd.Series,
                    cfg: dict,
@@ -240,7 +273,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
     stock_df = stock_df.sort_index().copy()
 
-    # --- Indicateurs ---
     rs_line = v4_rs_line(stock_df['Close'], idx_close)
     rsi = v4_rsi(stock_df['Close'], p=14)
     vratio = (stock_df['Volume'] / stock_df['Volume'].rolling(20, min_periods=20).mean()).fillna(0.0)
@@ -254,26 +286,21 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
         last_pivots=cfg['STRUCT_LAST_PIVOTS']
     )
 
-    # --- Filtre prix vs SMA long terme ---
     price_sma_p = int(cfg.get('PRICE_SMA_P', 200))
     price_sma = stock_df['Close'].rolling(price_sma_p, min_periods=price_sma_p).mean()
-
     price_filter_ok = (
         (stock_df['Close'] >= price_sma).fillna(False)
         if cfg.get('USE_PRICE_SMA_FILTER', False)
         else pd.Series(True, index=stock_df.index)
     )
 
-    # --- RS momentum ---
     rs_sma_p = int(cfg.get('RS_SMA_P', 20))
     rs_sma = rs_line.rolling(window=rs_sma_p).mean()
-
     if cfg.get('USE_RS_SMA_FILTER', False):
         rs_momentum_ok = (rs_line > rs_sma)
     else:
         rs_momentum_ok = pd.Series(True, index=stock_df.index)
 
-    # --- Score ---
     s_val = pd.Series(0.0, index=stock_df.index)
     s_val += np.where(struct_ok, cfg['W_STRUCT'], 0)
     s_val += np.where(sqz_flag, cfg['W_SQZ'], 0)
@@ -295,7 +322,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     else:
         score = pd.Series(np.where(rs_momentum_ok, s_val, 0), index=stock_df.index)
 
-    # --- Filtre marché ---
     idx_close_on_stock_dates = idx_close.reindex(stock_df.index)
     mkt_ok = (
         (idx_close_on_stock_dates > idx_sma_on_stock_dates.reindex(stock_df.index)).fillna(False)
@@ -303,7 +329,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
         else pd.Series(True, index=stock_df.index)
     )
 
-    # --- ATR ---
     tr = v4_true_range(stock_df)
     atr_vec = tr.rolling(cfg['ATR_P'], min_periods=cfg['ATR_P']).mean().shift(1).fillna(0.0)
 
@@ -316,14 +341,14 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     )
 
     skipped_tp135_slow = 0
+    skipped_range_slow_context = 0
 
-    # --- Boucle simulation ---
     for date in stock_df.index[start_i:]:
         row = stock_df.loc[date]
 
-        # ======================================================
-        # Gestion du trade en cours
-        # ======================================================
+        # -----------------------------------------------------
+        # GESTION DU TRADE EN COURS
+        # -----------------------------------------------------
         if active_trade is not None:
             active_trade['bars_held'] += 1
 
@@ -331,13 +356,11 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
             l_perf = (row['Low'] - active_trade['e_px']) / active_trade['e_px']
             c_perf = (row['Close'] - active_trade['e_px']) / active_trade['e_px']
 
-            # --- Logging analytique continu ---
             active_trade['mfe_pct'] = max(active_trade['mfe_pct'], float(h_perf))
             active_trade['mae_pct'] = min(active_trade['mae_pct'], float(l_perf))
             active_trade['max_close_pct'] = max(active_trade['max_close_pct'], float(c_perf))
             active_trade['min_close_pct'] = min(active_trade['min_close_pct'], float(c_perf))
 
-            # BE déclenché sur la barre mais appliqué à partir de la suivante
             be_eligible = active_trade['bars_held'] >= cfg['BE_DELAY']
             be_triggered_this_bar = (
                 (not active_trade['be_hit'])
@@ -345,7 +368,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 and be_eligible
             )
 
-            # --- Profit Lock ---
             if cfg.get('USE_PROFIT_LOCK', False):
                 if active_trade['mfe_pct'] >= cfg.get('LOCK2_TRIGGER', 0.10):
                     active_trade['profit_lock_raw'] = cfg.get('LOCK2_RAW', 0.0356)
@@ -355,10 +377,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                         active_trade['profit_lock_raw'] = cfg.get('LOCK1_RAW', 0.0206)
                         active_trade['profit_lock_level'] = 'LOCK1'
 
-            # Stop effectif
             effective_sl = cfg['FEES'] if active_trade['be_hit'] else -cfg['STOP_L']
-
-            # Si profit lock actif, il remonte le stop si plus protecteur
             if active_trade.get('profit_lock_raw') is not None:
                 effective_sl = max(effective_sl, active_trade['profit_lock_raw'])
 
@@ -382,7 +401,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 else:
                     active_trade['bars_to_sl'] = active_trade['bars_held']
 
-                # --- benchmark à la sortie ---
                 idx_exit_px = idx_close.reindex(stock_df.index).loc[date]
 
                 idx_return_trade_pct = None
@@ -405,7 +423,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     'Type': trade_type,
                     'Bars': active_trade['bars_held'],
 
-                    # --- Logging analytique existant ---
                     'MFE_Pct': round(active_trade['mfe_pct'] * 100, 2),
                     'MAE_Pct': round(active_trade['mae_pct'] * 100, 2),
                     'Max_Close_Pct': round(active_trade['max_close_pct'] * 100, 2),
@@ -417,14 +434,11 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     'BE_Assigned_Pct': round(active_trade['be_trig'] * 100, 2),
                     'BE_Type': active_trade['be_type'],
 
-                    # --- Profit Lock existant ---
                     'Profit_Lock_Level': active_trade.get('profit_lock_level', None),
                     'Profit_Lock_Raw_Pct': round(active_trade['profit_lock_raw'] * 100, 2)
                     if active_trade.get('profit_lock_raw') is not None else None,
 
-                    # ======================================================
-                    # NOUVEAUX CHAMPS D'ANALYSE A L'ENTREE
-                    # ======================================================
+                    # contexte d'entrée
                     'Score_Entry': round(active_trade['score_entry'], 2),
                     'RS_Line_Entry': round(active_trade['rs_line_entry'], 2),
                     'RS_SMA_Entry': round(active_trade['rs_sma_entry'], 2)
@@ -455,9 +469,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     'Is_Strong_Trend_Entry': active_trade['is_strong_trend_entry'],
                     'TP_Regime_Source': active_trade['tp_regime_source'],
 
-                    # ======================================================
-                    # PERFORMANCE RELATIVE AU BENCHMARK
-                    # ======================================================
                     'Idx_Close_Exit': round(float(idx_exit_px), 2) if pd.notna(idx_exit_px) else None,
                     'Stock_Return_Trade_Pct': round(stock_return_trade_pct, 2),
                     'Idx_Return_Trade_Pct': round(idx_return_trade_pct, 2) if idx_return_trade_pct is not None else None,
@@ -470,12 +481,11 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     active_trade['be_hit'] = True
                     if active_trade['bars_to_be'] is None:
                         active_trade['bars_to_be'] = active_trade['bars_held']
-
             continue
 
-        # ======================================================
-        # Entrée
-        # ======================================================
+        # -----------------------------------------------------
+        # ENTREE
+        # -----------------------------------------------------
         if (
             bool(mkt_ok.loc[date])
             and bool(price_filter_ok.loc[date])
@@ -495,9 +505,14 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
             is_fast_be = (slope >= 0.004 and vol_pct < cfg['VOL_LIM'])
             current_be_trig = cfg['BE_F'] if is_fast_be else cfg['BE_S']
 
-            # ======================================================
-            # Filtre demandé : exclure TP13.5 + SLOW
-            # ======================================================
+            idx_entry_px = idx_close.reindex(stock_df.index).loc[date]
+            idx_entry_sma = idx_sma_on_stock_dates.reindex(stock_df.index).loc[date]
+
+            idx_gap_vs_sma_pct = None
+            if pd.notna(idx_entry_px) and pd.notna(idx_entry_sma) and idx_entry_sma != 0:
+                idx_gap_vs_sma_pct = ((float(idx_entry_px) / float(idx_entry_sma)) - 1.0) * 100.0
+
+            # filtre existant : exclure TP13.5 + SLOW
             if cfg.get('EXCLUDE_TP135_SLOW', False):
                 is_tp_135 = abs(current_tp - cfg['TP_TREND']) < 1e-12
                 is_slow = not is_fast_be
@@ -505,19 +520,32 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                     skipped_tp135_slow += 1
                     continue
 
-            # --- enrichissement contexte d'entrée ---
+            # NOUVEAU filtre walk-forward sur 10 + SLOW
+            is_range_slow = (abs(current_tp - cfg['TP_RANGE']) < 1e-12) and (not is_fast_be)
+            if cfg.get('USE_RANGE_SLOW_CONTEXT_FILTER', False) and is_range_slow:
+                score_now = float(score.loc[date])
+
+                score_condition = False
+                if cfg.get('RANGE_SLOW_SCORE_MODE') == 'EQ100':
+                    score_condition = (abs(score_now - 100.0) < 1e-12)
+                elif cfg.get('RANGE_SLOW_SCORE_MODE') == 'GE97_5':
+                    score_condition = (score_now >= 97.5)
+                else:
+                    raise ValueError(f"RANGE_SLOW_SCORE_MODE inconnu: {cfg.get('RANGE_SLOW_SCORE_MODE')}")
+
+                if (
+                    score_condition
+                    and idx_gap_vs_sma_pct is not None
+                    and idx_gap_vs_sma_pct <= cfg['RANGE_SLOW_MAX_IDX_GAP']
+                ):
+                    skipped_range_slow_context += 1
+                    continue
+
             tp_regime_source = 'TREND'
             if is_strong:
                 tp_regime_source = 'TREND_BOOST'
             if slope < cfg['SLOPE_TRESH']:
                 tp_regime_source = 'RANGE'
-
-            idx_entry_px = idx_close.reindex(stock_df.index).loc[date]
-            idx_entry_sma = idx_sma_on_stock_dates.reindex(stock_df.index).loc[date]
-
-            idx_gap_vs_sma_pct = None
-            if pd.notna(idx_entry_px) and pd.notna(idx_entry_sma) and idx_entry_sma != 0:
-                idx_gap_vs_sma_pct = ((float(idx_entry_px) / float(idx_entry_sma)) - 1.0) * 100.0
 
             price_sma_entry = price_sma.loc[date] if date in price_sma.index else np.nan
             price_vs_sma200_pct = None
@@ -535,11 +563,9 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 'be_hit': False,
                 'bars_held': 0,
 
-                # --- Profit lock state ---
                 'profit_lock_raw': None,
                 'profit_lock_level': None,
 
-                # --- Logging analytique existant ---
                 'mfe_pct': 0.0,
                 'mae_pct': 0.0,
                 'max_close_pct': 0.0,
@@ -548,9 +574,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 'bars_to_tp': None,
                 'bars_to_sl': None,
 
-                # ======================================================
-                # NOUVEAUX CHAMPS D'ANALYSE A L'ENTREE
-                # ======================================================
+                # contexte d'entrée
                 'score_entry': float(score.loc[date]),
                 'rs_line_entry': float(rs_line.loc[date]),
                 'rs_sma_entry': float(rs_sma_entry) if pd.notna(rs_sma_entry) else None,
@@ -576,7 +600,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 'tp_regime_source': tp_regime_source
             }
 
-    # --- Trade en cours ---
     open_trade = None
     if active_trade is not None:
         last_close = float(stock_df.iloc[-1]['Close'])
@@ -592,36 +615,23 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
             'Seuil_BE_Pct': round(active_trade['be_trig'] * 100, 2),
             'Configuration_BE': active_trade['be_type'],
             'Statut_BE': 'SECURISE (BE)' if active_trade['be_hit'] else 'A RISQUE (SL)',
-            'Bars_Held': active_trade['bars_held'],
-
-            # --- Logging analytique ---
-            'MFE_Pct': round(active_trade['mfe_pct'] * 100, 2),
-            'MAE_Pct': round(active_trade['mae_pct'] * 100, 2),
-            'Max_Close_Pct': round(active_trade['max_close_pct'] * 100, 2),
-            'Min_Close_Pct': round(active_trade['min_close_pct'] * 100, 2),
-            'Bars_to_BE': active_trade['bars_to_be'],
-
-            # --- Profit lock ---
-            'Profit_Lock_Level': active_trade.get('profit_lock_level', None),
-            'Profit_Lock_Raw_Pct': round(active_trade['profit_lock_raw'] * 100, 2)
-            if active_trade.get('profit_lock_raw') is not None else None
+            'Bars_Held': active_trade['bars_held']
         }
 
     df_ledger = pd.DataFrame(ledger)
-
     stats = {
         'nb_trades': int(len(df_ledger)),
         'gain_total': float(df_ledger['Gain'].sum()) if len(df_ledger) else 0.0,
         'win_rate': float((df_ledger['Gain'] > 0).mean()) if len(df_ledger) else 0.0,
-        'skipped_tp135_slow': int(skipped_tp135_slow)
+        'skipped_tp135_slow': int(skipped_tp135_slow),
+        'skipped_range_slow_context': int(skipped_range_slow_context)
     }
-
     return stats, ledger, open_trade
 
 
-# ===========================
-# Moteur multi-tickers
-# ===========================
+# =========================================================
+# BACKTEST GLOBAL
+# =========================================================
 def alpha4(cfg):
     client = bigquery.Client(project=cfg['PROJECT'])
     query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
@@ -670,14 +680,19 @@ def alpha4(cfg):
             portfolio_open_positions.append(open_trade)
 
     df_ledger = pd.DataFrame(portfolio_trades)
-    total_skipped = int(sum(v.get('skipped_tp135_slow', 0) for v in per_ticker_stats.values()))
+    total_skipped_tp135_slow = int(sum(v.get('skipped_tp135_slow', 0) for v in per_ticker_stats.values()))
+    total_skipped_range_slow_context = int(sum(v.get('skipped_range_slow_context', 0) for v in per_ticker_stats.values()))
 
     return {
         'metadata': {
-            'system': 'Titanium v7 + exclude TP13.5 SLOW + enriched trade detail',
+            'system': 'Titanium walk-forward test harness',
             'universe': len(universe),
             'exclude_tp135_slow': cfg.get('EXCLUDE_TP135_SLOW', False),
-            'total_skipped_tp135_slow': total_skipped
+            'use_range_slow_context_filter': cfg.get('USE_RANGE_SLOW_CONTEXT_FILTER', False),
+            'range_slow_score_mode': cfg.get('RANGE_SLOW_SCORE_MODE'),
+            'range_slow_max_idx_gap': cfg.get('RANGE_SLOW_MAX_IDX_GAP'),
+            'total_skipped_tp135_slow': total_skipped_tp135_slow,
+            'total_skipped_range_slow_context': total_skipped_range_slow_context
         },
         'portfolio': {
             'gain_total': float(df_ledger['Gain'].sum()) if len(df_ledger) else 0.0,
@@ -690,8 +705,196 @@ def alpha4(cfg):
     }
 
 
-if __name__ == '__main__':
-    out = alpha4(ALPHA4_CFG)
-    print(json.dumps(out, indent=2, ensure_ascii=False))
+# =========================================================
+# METRIQUES
+# =========================================================
+def compute_xirr_from_ledger(df_ledger: pd.DataFrame) -> float:
+    if df_ledger is None or len(df_ledger) == 0:
+        return np.nan
 
-# ==== END sigma2.py
+    flows = []
+    for _, r in df_ledger.iterrows():
+        flows.append((pd.Timestamp(r['Achat']).normalize(), -LINE_SIZE))
+        flows.append((pd.Timestamp(r['Vente']).normalize(), LINE_SIZE + float(r['Gain'])))
+
+    cf = pd.DataFrame(flows, columns=['Date', 'CashFlow'])
+    cf = cf.groupby('Date', as_index=False)['CashFlow'].sum().sort_values('Date')
+
+    if len(cf) < 2:
+        return np.nan
+
+    base = cf['Date'].min()
+    am = cf['CashFlow'].tolist()
+    dt = cf['Date'].tolist()
+
+    def xnpv(rate):
+        return sum(a / ((1 + rate) ** (((d - base).days / 365.25))) for a, d in zip(am, dt))
+
+    lo, hi = -0.9999, 0.1
+    vlo, vhi = xnpv(lo), xnpv(hi)
+
+    while np.isfinite(vlo) and np.isfinite(vhi) and vlo * vhi > 0 and hi < 1e6:
+        hi *= 2
+        vhi = xnpv(hi)
+
+    if not np.isfinite(vlo) or not np.isfinite(vhi) or vlo * vhi > 0:
+        return np.nan
+
+    for _ in range(400):
+        mid = (lo + hi) / 2
+        vm = xnpv(mid)
+        if abs(vm) < 1e-12:
+            return mid
+        if vlo * vm <= 0:
+            hi = mid
+            vhi = vm
+        else:
+            lo = mid
+            vlo = vm
+
+    return (lo + hi) / 2
+
+
+def compute_realized_dd(df_ledger: pd.DataFrame) -> float:
+    if df_ledger is None or len(df_ledger) == 0:
+        return np.nan
+    s = df_ledger.sort_values(['Vente', 'Achat']).copy()
+    cum = s['Gain'].cumsum()
+    peak = cum.cummax()
+    dd = peak - cum
+    return float(dd.max())
+
+
+def summarize_period(df_ledger: pd.DataFrame, start_year: int, end_year: int):
+    g = df_ledger[(pd.to_datetime(df_ledger['Vente']).dt.year >= start_year) &
+                  (pd.to_datetime(df_ledger['Vente']).dt.year <= end_year)].copy()
+
+    if len(g) == 0:
+        return {
+            'trades': 0,
+            'profit': 0.0,
+            'xirr': np.nan,
+            'dd': np.nan,
+            'tp': 0,
+            'be': 0,
+            'sl': 0,
+            'lock1': 0,
+            'profit_factor': np.nan
+        }
+
+    wins = g.loc[g['Gain'] > 0, 'Gain']
+    losses = g.loc[g['Gain'] < 0, 'Gain']
+
+    return {
+        'trades': int(len(g)),
+        'profit': float(g['Gain'].sum()),
+        'xirr': float(compute_xirr_from_ledger(g)),
+        'dd': float(compute_realized_dd(g)),
+        'tp': int((g['Type'] == 'TP').sum()),
+        'be': int((g['Type'] == 'BE').sum()),
+        'sl': int((g['Type'] == 'SL').sum()),
+        'lock1': int((g['Type'] == 'LOCK1').sum()),
+        'profit_factor': float(wins.sum() / abs(losses.sum())) if len(losses) and losses.sum() != 0 else np.nan
+    }
+
+
+def choose_best_variant(results_for_variants):
+    """
+    Règle simple:
+    1. profit calibration max
+    2. si égalité, DD calibration plus faible
+    3. si égalité, XIRR calibration plus élevé
+    """
+    best = None
+    for r in results_for_variants:
+        if best is None:
+            best = r
+            continue
+
+        a = r['train_metrics']
+        b = best['train_metrics']
+
+        if a['profit'] > b['profit']:
+            best = r
+        elif a['profit'] == b['profit']:
+            if (np.isnan(b['dd']) or (not np.isnan(a['dd']) and a['dd'] < b['dd'])):
+                best = r
+            elif a['dd'] == b['dd']:
+                if (np.isnan(b['xirr']) or (not np.isnan(a['xirr']) and a['xirr'] > b['xirr'])):
+                    best = r
+    return best
+
+
+# =========================================================
+# WALK-FORWARD
+# =========================================================
+def run_walkforward():
+    all_fold_outputs = []
+
+    # baseline une fois par fold
+    for fold in WALKFORWARD_FOLDS:
+        fold_name = fold['name']
+        train_start = fold['train_start']
+        train_end = fold['train_end']
+        test_year = fold['test_year']
+
+        variant_results = []
+
+        # baseline sans filtre additionnel 10+SLOW
+        base_cfg = copy.deepcopy(ALPHA4_CFG)
+        base_cfg['USE_RANGE_SLOW_CONTEXT_FILTER'] = False
+        base_run = alpha4(base_cfg)
+        base_ledger = pd.DataFrame(base_run['trades'])
+
+        baseline_train = summarize_period(base_ledger, train_start, train_end)
+        baseline_test = summarize_period(base_ledger, test_year, test_year)
+
+        # variantes
+        for var in VARIANTS:
+            cfg = copy.deepcopy(ALPHA4_CFG)
+            cfg['USE_RANGE_SLOW_CONTEXT_FILTER'] = True
+            cfg['RANGE_SLOW_SCORE_MODE'] = var['RANGE_SLOW_SCORE_MODE']
+            cfg['RANGE_SLOW_MAX_IDX_GAP'] = var['RANGE_SLOW_MAX_IDX_GAP']
+
+            run = alpha4(cfg)
+            ledger = pd.DataFrame(run['trades'])
+
+            train_metrics = summarize_period(ledger, train_start, train_end)
+            test_metrics = summarize_period(ledger, test_year, test_year)
+
+            variant_results.append({
+                'variant_name': var['name'],
+                'config': {
+                    'score_mode': var['RANGE_SLOW_SCORE_MODE'],
+                    'max_idx_gap': var['RANGE_SLOW_MAX_IDX_GAP']
+                },
+                'metadata': run['metadata'],
+                'train_metrics': train_metrics,
+                'test_metrics': test_metrics
+            })
+
+        best_variant = choose_best_variant(variant_results)
+
+        # lecture OOS du meilleur variant vs baseline
+        fold_output = {
+            'fold': fold_name,
+            'train_period': f'{train_start}-{train_end}',
+            'test_period': str(test_year),
+            'baseline': {
+                'train': baseline_train,
+                'test': baseline_test
+            },
+            'all_variants': variant_results,
+            'selected_variant': best_variant
+        }
+
+        all_fold_outputs.append(fold_output)
+
+    return all_fold_outputs
+
+
+if __name__ == '__main__':
+    wf = run_walkforward()
+    print(json.dumps(wf, indent=2, ensure_ascii=False, default=str))
+
+# ==== END walkforward_sigma2.py ====
