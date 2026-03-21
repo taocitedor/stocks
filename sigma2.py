@@ -645,7 +645,7 @@ def alpha4(cfg):
                 WHERE Date >= DATE('{start_date}')
                 ORDER BY Date ASC
             """
-        else:
+    else:
             query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
 
     # ===========================
