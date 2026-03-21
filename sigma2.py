@@ -11,6 +11,10 @@ ALPHA4_CFG = {
     'TBL': 'CC_Historique_Cours_v2',
     'IDX': '^FCHI',
 
+    # --- Fenêtre d'analyse simple ---
+    'USE_DAYS_BACK_FILTER': False,   # False = tout l'historique / True = filtre actif
+    'DAYS_BACK_FROM_TODAY': 365,     # nombre de jours en arrière depuis aujourd'hu
+    
     # --- Moteur principal ---
     'MKT_FILTER': True,
     'SMA_P': 100,
@@ -624,7 +628,30 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 # ===========================
 def alpha4(cfg):
     client = bigquery.Client(project=cfg['PROJECT'])
-    query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
+    
+    # query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
+
+    # ===========================
+    # Version filtrée de la requete
+    # ===========================
+    if cfg.get('USE_DAYS_BACK_FILTER', False):
+            days_back = int(cfg.get('DAYS_BACK_FROM_TODAY', 365))
+            days_back = max(days_back, 365)  # sécurité : au moins 1 an
+            start_date = (pd.Timestamp.today().normalize() - pd.Timedelta(days=days_back)).strftime('%Y-%m-%d')
+    
+            query = f"""
+                SELECT *
+                FROM `{cfg['DB_SET']}.{cfg['TBL']}`
+                WHERE Date >= DATE('{start_date}')
+                ORDER BY Date ASC
+            """
+        else:
+            query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
+
+    # ===========================
+    # Fin Version filtrée de la requete
+    # ===========================
+    
     df = client.query(query).to_dataframe()
 
     df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
