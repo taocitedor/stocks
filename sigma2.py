@@ -1,4 +1,7 @@
+# === v10 - 28032026
 # ==== START sigma2.py
+import math
+from collections import defaultdict
 import json
 import numpy as np
 import pandas as pd
@@ -14,7 +17,25 @@ ALPHA4_CFG = {
     # --- Fenêtre d'analyse simple ---
     'USE_DAYS_BACK_FILTER': False,   # False = tout l'historique / True = filtre actif
     'DAYS_BACK_FROM_TODAY': 365,     # nombre de jours en arrière depuis aujourd'hu
+
+    # --- Gestion portefeuille / cash ---
+    'INITIAL_CASH': 50000.0,             # cash de départ
+    'USE_CASH_ALLOCATOR': True,          # active la couche portefeuille
     
+    # Taille des nouvelles positions
+    'POSITION_SIZE_MODE': 'fixed',       # 'fixed' ou 'equal_split'
+    'SIZE': 4000.0,                      # cible nominale par ligne
+    'MIN_ORDER_EUR': 1000.0,             # pas de ligne si trop petite
+    
+    # Contraintes portefeuille
+    'MAX_OPEN_POSITIONS': 10,
+    'MAX_TOTAL_EXPOSURE_PCT': 0.80,      # 80% du capital max investi
+    'MIN_CASH_BUFFER_PCT': 0.05,         # garde 5% de cash
+    'MAX_NEW_ENTRIES_PER_DAY': 3,        # max de nouvelles entrées par jour
+    
+    # Priorisation des signaux concurrents le même jour
+    'ENTRY_PRIORITY': 'score_then_volume',   # 'score_only' ou 'score_then_volume'
+
     # --- Moteur principal ---
     'MKT_FILTER': True,
     'SMA_P': 100,
@@ -231,7 +252,91 @@ def v4_true_range(df: pd.DataFrame) -> pd.Series:
     ], axis=1).max(axis=1)
 
     return tr
+    
+# ===========================
+# Fonctions utilitaires
+# ===========================
 
+def _to_ts(x):
+    ts = pd.to_datetime(x, errors='coerce')
+    if pd.isna(ts):
+        return pd.NaT
+    try:
+        return ts.tz_localize(None)
+    except Exception:
+        return ts
+
+def _safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+def _safe_int(x, default=0):
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+def _sort_trade_candidates(candidates, cfg):
+    mode = cfg.get('ENTRY_PRIORITY', 'score_then_volume')
+
+    if mode == 'score_only':
+        return sorted(
+            candidates,
+            key=lambda x: _safe_float(x.get('Score_Entry'), -1e9),
+            reverse=True
+        )
+
+    return sorted(
+        candidates,
+        key=lambda x: (
+            _safe_float(x.get('Score_Entry'), -1e9),
+            _safe_float(x.get('Volume_Ratio_Entry'), -1e9)
+        ),
+        reverse=True
+    )
+
+def _compute_real_entry_quantity(entry_px, budget_eur, fees_pct):
+    """
+    Calcule la quantité entière maximale d'actions achetables
+    sans dépasser le budget, frais inclus.
+    """
+    entry_px = _safe_float(entry_px, 0.0)
+    budget_eur = _safe_float(budget_eur, 0.0)
+    fees_pct = _safe_float(fees_pct, 0.0)
+
+    if entry_px <= 0 or budget_eur <= 0:
+        return 0, 0.0, 0.0, 0.0
+
+    cost_per_share = entry_px * (1.0 + fees_pct)
+    qty = int(math.floor(budget_eur / cost_per_share))
+
+    if qty <= 0:
+        return 0, 0.0, 0.0, 0.0
+
+    gross_buy = qty * entry_px
+    buy_fees = gross_buy * fees_pct
+    cash_debited = gross_buy + buy_fees
+
+    return qty, gross_buy, buy_fees, cash_debited
+
+def _compute_real_exit_cash(qty, exit_px, fees_pct):
+    """
+    Cash récupéré à la vente après frais.
+    """
+    qty = _safe_int(qty, 0)
+    exit_px = _safe_float(exit_px, 0.0)
+    fees_pct = _safe_float(fees_pct, 0.0)
+
+    if qty <= 0 or exit_px <= 0:
+        return 0.0, 0.0, 0.0
+
+    gross_sell = qty * exit_px
+    sell_fees = gross_sell * fees_pct
+    cash_credited = gross_sell - sell_fees
+
+    return gross_sell, sell_fees, cash_credited
 
 # ===========================
 # Moteur par ticker
@@ -532,7 +637,9 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
             active_trade = {
                 'date': date,
-                'e_px': float(row['Close']),
+                'e_px': float(row['Close']),           
+                'size': float(cfg['SIZE']),
+                'fees': float(cfg['FEES']),
                 'tp_val': float(current_tp),
                 'be_trig': float(current_be_trig),
                 'be_type': 'FAST' if is_fast_be else 'SLOW',
@@ -555,12 +662,12 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 # ======================================================
                 # NOUVEAUX CHAMPS D'ANALYSE A L'ENTREE
                 # ======================================================
-                'score_entry': float(score.loc[date]),
+                'Score_Entry': float(score),
                 'rs_line_entry': float(rs_line.loc[date]),
                 'rs_sma_entry': float(rs_sma_entry) if pd.notna(rs_sma_entry) else None,
                 'rs_momentum_ok_entry': bool(rs_momentum_ok.loc[date]),
                 'rsi_entry': float(rsi.loc[date]),
-                'volume_ratio_entry': float(vratio.loc[date]),
+                'Volume_Ratio_Entry': float(row.get('Volume_Ratio', 0.0)) if 'Volume_Ratio' in row else None,
                 'dist_m20_entry_pct': float(dist_m20.loc[date] * 100.0),
                 'squeeze_flag_entry': bool(sqz_flag.loc[date]),
                 'structure_label_entry': struct_label.loc[date],
@@ -577,6 +684,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 'vol_pct_entry': float(vol_pct * 100.0),
                 'is_fast_be_entry': bool(is_fast_be),
                 'is_strong_trend_entry': bool(is_strong),
+                'Structure_Label_Entry': structure_label,
                 'tp_regime_source': tp_regime_source
             }
 
@@ -622,46 +730,351 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
     return stats, ledger, open_trade
 
+# ===========================
+# Cloture - gestion de portefeuille
+# ===========================
+
+def _close_trade_v4(tr, date, exit_px, exit_type, stock_df_attrs, idx_close_entry=None, idx_close_exit=None):
+    """
+    Clôture un trade en conservant explicitement prix d'entrée / sortie
+    et toutes les infos utiles à l'allocator portefeuille.
+    """
+    entry_px = _safe_float(tr.get('e_px'), 0.0)
+    exit_px = _safe_float(exit_px, 0.0)
+    fees = _safe_float(tr.get('fees', 0.0), 0.0)
+    size = _safe_float(tr.get('size', 0.0), 0.0)
+
+    # PnL théorique historique sur SIZE nominal
+    gross_buy = size
+    cash_out = gross_buy * (1.0 + fees)
+
+    qty_theoretical = gross_buy / entry_px if entry_px > 0 else 0.0
+    gross_sell = qty_theoretical * exit_px if exit_px > 0 else 0.0
+    cash_in = gross_sell * (1.0 - fees)
+
+    gain = cash_in - cash_out
+
+    stock_ret_trade_pct = ((exit_px / entry_px) - 1.0) * 100.0 if entry_px > 0 and exit_px > 0 else None
+    idx_return_trade_pct = None
+    excess_return_vs_idx_pct = None
+
+    if idx_close_entry is not None and idx_close_exit is not None and idx_close_entry > 0:
+        idx_return_trade_pct = ((idx_close_exit / idx_close_entry) - 1.0) * 100.0
+        if stock_ret_trade_pct is not None:
+            excess_return_vs_idx_pct = stock_ret_trade_pct - idx_return_trade_pct
+
+    out = {
+        'Ticker': stock_df_attrs.get('Ticker', 'NA'),
+        'Achat': tr['date'].strftime('%Y-%m-%d'),
+        'Vente': date.strftime('%Y-%m-%d'),
+
+        'Prix_Entree': round(entry_px, 6),
+        'Prix_Vente': round(exit_px, 6),
+
+        'Type': exit_type,
+        'Gain': round(gain, 2),
+        'Orig_SIZE': round(size, 2),
+
+        'Stock_Return_Trade_Pct': round(stock_ret_trade_pct, 4) if stock_ret_trade_pct is not None else None,
+        'Idx_Return_Trade_Pct': round(idx_return_trade_pct, 4) if idx_return_trade_pct is not None else None,
+        'Excess_Return_vs_Idx_Pct': round(excess_return_vs_idx_pct, 4) if excess_return_vs_idx_pct is not None else None,
+
+        'BE_Assigned_Pct': round(_safe_float(tr.get('be_trig'), 0.0) * 100.0, 4),
+        'BE_Type': tr.get('be_type'),
+        'TP_Assigned_Pct': round(_safe_float(tr.get('tp_val'), 0.0) * 100.0, 4),
+
+        'Bars': tr.get('bars_held'),
+        'Bars_to_BE': tr.get('bars_to_be'),
+        'Bars_to_SL': tr.get('bars_to_sl'),
+        'Bars_to_TP': tr.get('bars_to_tp'),
+
+        'MAE_Pct': round(_safe_float(tr.get('mae_pct'), 0.0) * 100.0, 4),
+        'MFE_Pct': round(_safe_float(tr.get('mfe_pct'), 0.0) * 100.0, 4),
+        'Max_Close_Pct': round(_safe_float(tr.get('max_close_pct'), 0.0) * 100.0, 4),
+        'Min_Close_Pct': round(_safe_float(tr.get('min_close_pct'), 0.0) * 100.0, 4),
+
+        'Score_Entry': tr.get('Score_Entry'),
+        'Volume_Ratio_Entry': tr.get('Volume_Ratio_Entry'),
+        'TP_Regime_Source': tr.get('TP_Regime_Source'),
+        'Structure_Label_Entry': tr.get('Structure_Label_Entry'),
+
+        'Profit_Lock_Level': tr.get('profit_lock_level'),
+        'Profit_Lock_Raw_Pct': round(_safe_float(tr.get('profit_lock_raw'), 0.0) * 100.0, 4)
+        if tr.get('profit_lock_raw') is not None else None
+    }
+
+    return out
+
+# ===========================
+# Gestion du cash
+# ===========================
+
+def _apply_cash_allocator(candidate_trades, candidate_open_positions, cfg):
+    if not candidate_trades:
+        return [], [], {
+            'initial_cash': _safe_float(cfg.get('INITIAL_CASH', 0.0)),
+            'ending_cash': _safe_float(cfg.get('INITIAL_CASH', 0.0)),
+            'max_exposure_eur': 0.0,
+            'max_open_positions_realized': 0,
+            'rejected_entries_count': 0,
+            'exposure_cap_eur': 0.0,
+            'cash_buffer_eur': 0.0
+        }
+
+    initial_cash = _safe_float(cfg.get('INITIAL_CASH', 50000.0))
+    cash = initial_cash
+
+    size_cfg = _safe_float(cfg.get('SIZE', 4000.0))
+    fees_pct = _safe_float(cfg.get('FEES', 0.0))
+    min_order_eur = _safe_float(cfg.get('MIN_ORDER_EUR', 1000.0))
+    max_open_positions = int(cfg.get('MAX_OPEN_POSITIONS', 10))
+    max_new_entries_per_day = int(cfg.get('MAX_NEW_ENTRIES_PER_DAY', 3))
+    max_total_exposure_pct = _safe_float(cfg.get('MAX_TOTAL_EXPOSURE_PCT', 0.80))
+    min_cash_buffer_pct = _safe_float(cfg.get('MIN_CASH_BUFFER_PCT', 0.05))
+    position_size_mode = cfg.get('POSITION_SIZE_MODE', 'fixed')
+
+    cash_buffer = initial_cash * min_cash_buffer_pct
+    exposure_cap_eur = initial_cash * max_total_exposure_pct
+
+    trades = []
+    for t in candidate_trades:
+        tt = dict(t)
+        tt['Achat_ts'] = _to_ts(tt.get('Achat'))
+        tt['Vente_ts'] = _to_ts(tt.get('Vente'))
+        if pd.isna(tt['Achat_ts']) or pd.isna(tt['Vente_ts']):
+            continue
+
+        tt['Entry_Price_Real'] = _safe_float(tt.get('Prix_Entree'), 0.0)
+        tt['Exit_Price_Real'] = _safe_float(tt.get('Prix_Vente'), 0.0)
+        trades.append(tt)
+
+    if not trades:
+        return [], [], {
+            'initial_cash': initial_cash,
+            'ending_cash': initial_cash,
+            'max_exposure_eur': 0.0,
+            'max_open_positions_realized': 0,
+            'rejected_entries_count': 0,
+            'exposure_cap_eur': exposure_cap_eur,
+            'cash_buffer_eur': cash_buffer
+        }
+
+    all_dates = sorted(set(
+        [t['Achat_ts'].normalize() for t in trades] +
+        [t['Vente_ts'].normalize() for t in trades]
+    ))
+
+    entries_by_date = defaultdict(list)
+    exits_by_date = defaultdict(list)
+
+    for t in trades:
+        entries_by_date[t['Achat_ts'].normalize()].append(t)
+        exits_by_date[t['Vente_ts'].normalize()].append(t)
+
+    open_positions = []
+    accepted_trades = []
+    rejected_entries_count = 0
+
+    max_exposure_realized = 0.0
+    max_open_positions_realized = 0
+
+    for current_date in all_dates:
+        # =================================================
+        # 1) Sorties : on libère le cash d'abord
+        # =================================================
+        still_open = []
+        for pos in open_positions:
+            if pos['Vente_ts'].normalize() == current_date:
+                gross_sell, sell_fees, cash_credited = _compute_real_exit_cash(
+                    qty=pos['Qty'],
+                    exit_px=pos['Exit_Price_Real'],
+                    fees_pct=fees_pct
+                )
+
+                cash += cash_credited
+
+                pos['Gross_Sell_EUR'] = round(gross_sell, 2)
+                pos['Sell_Fees_EUR'] = round(sell_fees, 2)
+                pos['Cash_Credited_At_Exit_EUR'] = round(cash_credited, 2)
+                pos['Allocated_Gain_EUR'] = round(cash_credited - pos['Cash_Debited_At_Entry_EUR'], 2)
+
+                accepted_trades.append(pos)
+            else:
+                still_open.append(pos)
+
+        open_positions = still_open
+
+        # =================================================
+        # 2) Budget disponible
+        # =================================================
+        current_exposure = sum(p['Gross_Buy_EUR'] for p in open_positions)
+        remaining_exposure_cap = max(0.0, exposure_cap_eur - current_exposure)
+        available_cash_for_entries = max(0.0, cash - cash_buffer)
+        entry_budget = min(available_cash_for_entries, remaining_exposure_cap)
+        remaining_slots = max_open_positions - len(open_positions)
+
+        max_exposure_realized = max(max_exposure_realized, current_exposure)
+        max_open_positions_realized = max(max_open_positions_realized, len(open_positions))
+
+        if entry_budget <= 0 or remaining_slots <= 0:
+            continue
+
+        # =================================================
+        # 3) Signaux du jour
+        # =================================================
+        day_candidates = _sort_trade_candidates(entries_by_date.get(current_date, []), cfg)
+        if not day_candidates:
+            continue
+
+        day_candidates = day_candidates[:max_new_entries_per_day]
+        day_candidates = day_candidates[:remaining_slots]
+
+        if not day_candidates:
+            continue
+
+        # =================================================
+        # 4) Allocation de budget entre signaux retenus
+        # =================================================
+        if position_size_mode == 'equal_split':
+            target_budgets = [entry_budget / len(day_candidates)] * len(day_candidates)
+        else:
+            target_budgets = []
+            tmp_budget = entry_budget
+            for _ in day_candidates:
+                budget_i = min(size_cfg, tmp_budget)
+                target_budgets.append(budget_i)
+                tmp_budget -= budget_i
+
+        # =================================================
+        # 5) Entrées réelles : quantité entière d'actions
+        # =================================================
+        for cand, target_budget in zip(day_candidates, target_budgets):
+            entry_px = _safe_float(cand.get('Entry_Price_Real'), 0.0)
+            if entry_px <= 0:
+                rejected_entries_count += 1
+                continue
+
+            qty, gross_buy, buy_fees, cash_debited = _compute_real_entry_quantity(
+                entry_px=entry_px,
+                budget_eur=min(target_budget, entry_budget),
+                fees_pct=fees_pct
+            )
+
+            if qty <= 0 or cash_debited < min_order_eur:
+                rejected_entries_count += 1
+                continue
+
+            if cash_debited > cash:
+                rejected_entries_count += 1
+                continue
+
+            cash -= cash_debited
+            entry_budget -= cash_debited
+
+            pos = dict(cand)
+            pos['Qty'] = int(qty)
+            pos['Gross_Buy_EUR'] = round(gross_buy, 2)
+            pos['Buy_Fees_EUR'] = round(buy_fees, 2)
+            pos['Cash_Debited_At_Entry_EUR'] = round(cash_debited, 2)
+            pos['Allocated_SIZE_EUR'] = round(gross_buy, 2)
+            pos['Portfolio_Entry_Date'] = current_date.strftime('%Y-%m-%d')
+            pos['Portfolio_Cash_After_Entry'] = round(cash, 2)
+
+            open_positions.append(pos)
+
+        current_exposure = sum(p['Gross_Buy_EUR'] for p in open_positions)
+        max_exposure_realized = max(max_exposure_realized, current_exposure)
+        max_open_positions_realized = max(max_open_positions_realized, len(open_positions))
+
+    # =====================================================
+    # 6) Positions encore ouvertes en fin de période
+    # =====================================================
+    accepted_open_positions = []
+
+    candidate_open_map = {}
+    for op in candidate_open_positions:
+        key = (
+            str(op.get('Ticker')),
+            str(op.get('Date_Achat'))
+        )
+        candidate_open_map[key] = op
+
+    for pos in open_positions:
+        key = (str(pos.get('Ticker')), str(pos.get('Achat'))[:10])
+        enriched = candidate_open_map.get(key)
+
+        if enriched:
+            final_op = dict(enriched)
+        else:
+            final_op = {
+                'Ticker': pos.get('Ticker'),
+                'Date_Achat': str(pos.get('Achat'))[:10],
+                'Prix_Entree': pos.get('Entry_Price_Real'),
+                'Prix_Actuel': None,
+                'Perf_Latente_Pct': None
+            }
+
+        final_op['Qty'] = pos['Qty']
+        final_op['Allocated_SIZE_EUR'] = pos['Allocated_SIZE_EUR']
+        final_op['Gross_Buy_EUR'] = pos['Gross_Buy_EUR']
+        final_op['Buy_Fees_EUR'] = pos['Buy_Fees_EUR']
+        final_op['Cash_Debited_At_Entry_EUR'] = pos['Cash_Debited_At_Entry_EUR']
+        final_op['Portfolio_Cash_Current'] = round(cash, 2)
+
+        accepted_open_positions.append(final_op)
+
+    allocator_metadata = {
+        'initial_cash': round(initial_cash, 2),
+        'ending_cash': round(cash, 2),
+        'max_exposure_eur': round(max_exposure_realized, 2),
+        'max_open_positions_realized': int(max_open_positions_realized),
+        'rejected_entries_count': int(rejected_entries_count),
+        'exposure_cap_eur': round(exposure_cap_eur, 2),
+        'cash_buffer_eur': round(cash_buffer, 2)
+    }
+
+    return accepted_trades, accepted_open_positions, allocator_metadata
+
 
 # ===========================
 # Moteur multi-tickers
 # ===========================
 def alpha4(cfg):
     client = bigquery.Client(project=cfg['PROJECT'])
-    
-    # query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
 
-    # ===========================
-    # Version filtrée de la requete
-    # ===========================
     if cfg.get('USE_DAYS_BACK_FILTER', False):
-            days_back = int(cfg.get('DAYS_BACK_FROM_TODAY', 365))
-            days_back = max(days_back, 365)  # sécurité : au moins 1 an
-            start_date = (pd.Timestamp.today().normalize() - pd.Timedelta(days=days_back)).strftime('%Y-%m-%d')
-    
-            query = f"""
-                SELECT *
-                FROM `{cfg['DB_SET']}.{cfg['TBL']}`
-                WHERE Date >= DATE('{start_date}')
-                ORDER BY Date ASC
-            """
+        days_back = int(cfg.get('DAYS_BACK_FROM_TODAY', 365))
+        days_back = max(days_back, 365)
+        start_date = (pd.Timestamp.today().normalize() - pd.Timedelta(days=days_back)).strftime('%Y-%m-%d')
+
+        query = f"""
+            SELECT *
+            FROM `{cfg['DB_SET']}.{cfg['TBL']}`
+            WHERE Date >= DATE('{start_date}')
+            ORDER BY Date ASC
+        """
     else:
-            query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
+        query = f"SELECT * FROM `{cfg['DB_SET']}.{cfg['TBL']}` ORDER BY Date ASC"
 
-    # ===========================
-    # Fin Version filtrée de la requete
-    # ===========================
-    
     df = client.query(query).to_dataframe()
-
     df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
 
     for c in ['Close', 'High', 'Low', 'Volume']:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
 
+    # Déduplication sécurité
+    df = df.sort_values(['Ticker', 'Date'])
+    df = df.drop_duplicates(subset=['Ticker', 'Date'], keep='last').reset_index(drop=True)
+
     idx_ticker = cfg['IDX']
-    base_idx = df[df['Ticker'] == idx_ticker].copy().set_index('Date').sort_index()
+    base_idx = (
+        df[df['Ticker'] == idx_ticker]
+        .copy()
+        .drop_duplicates(subset=['Date'], keep='last')
+        .set_index('Date')
+        .sort_index()
+    )
 
     idx_close = base_idx['Close']
     idx_sma = idx_close.rolling(cfg['SMA_P'], min_periods=cfg['SMA_P']).mean()
@@ -671,12 +1084,18 @@ def alpha4(cfg):
     if cfg['UNIVERSE']:
         universe = [t for t in universe if t in cfg['UNIVERSE']]
 
-    portfolio_trades = []
-    portfolio_open_positions = []
+    all_candidate_trades = []
+    all_candidate_open_positions = []
     per_ticker_stats = {}
 
     for t in universe:
-        d = df[df['Ticker'] == t].copy().set_index('Date').sort_index()
+        d = (
+            df[df['Ticker'] == t]
+            .copy()
+            .drop_duplicates(subset=['Ticker', 'Date'], keep='last')
+            .set_index('Date')
+            .sort_index()
+        )
         d.attrs['Ticker'] = t
 
         if len(d) < 100:
@@ -691,26 +1110,51 @@ def alpha4(cfg):
         )
 
         per_ticker_stats[t] = stats
-        portfolio_trades.extend(trades)
+        all_candidate_trades.extend(trades)
 
         if open_trade:
-            portfolio_open_positions.append(open_trade)
+            all_candidate_open_positions.append(open_trade)
+
+    if cfg.get('USE_CASH_ALLOCATOR', True):
+        portfolio_trades, portfolio_open_positions, allocator_metadata = _apply_cash_allocator(
+            all_candidate_trades,
+            all_candidate_open_positions,
+            cfg
+        )
+    else:
+        portfolio_trades = all_candidate_trades
+        portfolio_open_positions = all_candidate_open_positions
+        allocator_metadata = {
+            'initial_cash': None,
+            'ending_cash': None,
+            'max_exposure_eur': None,
+            'max_open_positions_realized': None,
+            'rejected_entries_count': 0,
+            'exposure_cap_eur': None,
+            'cash_buffer_eur': None
+        }
 
     df_ledger = pd.DataFrame(portfolio_trades)
     total_skipped = int(sum(v.get('skipped_tp135_slow', 0) for v in per_ticker_stats.values()))
 
+    gain_col = 'Allocated_Gain_EUR' if 'Allocated_Gain_EUR' in df_ledger.columns else 'Gain'
+
     return {
         'metadata': {
-            'system': 'Titanium v7 + exclude TP13.5 SLOW + enriched trade detail',
+            'system': 'Titanium v7 + cash allocator + real share allocation',
             'universe': len(universe),
             'exclude_tp135_slow': cfg.get('EXCLUDE_TP135_SLOW', False),
-            'total_skipped_tp135_slow': total_skipped
+            'total_skipped_tp135_slow': total_skipped,
+            'use_days_back_filter': cfg.get('USE_DAYS_BACK_FILTER', False),
+            'days_back_from_today': cfg.get('DAYS_BACK_FROM_TODAY', None) if cfg.get('USE_DAYS_BACK_FILTER', False) else None,
+            'use_cash_allocator': cfg.get('USE_CASH_ALLOCATOR', True)
         },
         'portfolio': {
-            'gain_total': float(df_ledger['Gain'].sum()) if len(df_ledger) else 0.0,
+            'gain_total': float(df_ledger[gain_col].sum()) if len(df_ledger) else 0.0,
             'nb_trades': int(len(df_ledger)) if len(df_ledger) else 0,
-            'win_rate': float((df_ledger['Gain'] > 0).mean()) if len(df_ledger) else 0.0,
-            'by_ticker': per_ticker_stats
+            'win_rate': float((df_ledger[gain_col] > 0).mean()) if len(df_ledger) else 0.0,
+            'by_ticker': per_ticker_stats,
+            'allocator': allocator_metadata
         },
         'open_positions': portfolio_open_positions,
         'trades': df_ledger.to_dict(orient='records') if len(df_ledger) else []
