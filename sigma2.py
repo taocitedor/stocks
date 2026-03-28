@@ -1,5 +1,6 @@
 # === v10 - 28032026
 # ==== START sigma2.py
+
 import math
 from collections import defaultdict
 import json
@@ -16,23 +17,23 @@ ALPHA4_CFG = {
 
     # --- Fenêtre d'analyse simple ---
     'USE_DAYS_BACK_FILTER': False,   # False = tout l'historique / True = filtre actif
-    'DAYS_BACK_FROM_TODAY': 365,     # nombre de jours en arrière depuis aujourd'hu
+    'DAYS_BACK_FROM_TODAY': 365,     # nombre de jours en arrière depuis aujourd'hui
 
     # --- Gestion portefeuille / cash ---
     'INITIAL_CASH': 50000.0,             # cash de départ
     'USE_CASH_ALLOCATOR': True,          # active la couche portefeuille
-    
+
     # Taille des nouvelles positions
     'POSITION_SIZE_MODE': 'fixed',       # 'fixed' ou 'equal_split'
     'SIZE': 4000.0,                      # cible nominale par ligne
     'MIN_ORDER_EUR': 1000.0,             # pas de ligne si trop petite
-    
+
     # Contraintes portefeuille
     'MAX_OPEN_POSITIONS': 10,
     'MAX_TOTAL_EXPOSURE_PCT': 0.80,      # 80% du capital max investi
     'MIN_CASH_BUFFER_PCT': 0.05,         # garde 5% de cash
     'MAX_NEW_ENTRIES_PER_DAY': 3,        # max de nouvelles entrées par jour
-    
+
     # Priorisation des signaux concurrents le même jour
     'ENTRY_PRIORITY': 'score_then_volume',   # 'score_only' ou 'score_then_volume'
 
@@ -87,7 +88,6 @@ ALPHA4_CFG = {
     'ATR_P': 50,
     'STOP_L': 0.10,
     'FEES': 0.0056,
-    'SIZE': 4000,
 
     # --- Structure & pivots ---
     'PIVOT_W': 3,
@@ -103,6 +103,7 @@ ALPHA4_CFG = {
 # ===========================
 # Indicateurs (parité GAS)
 # ===========================
+
 def v4_rs_line(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
     stock_close = pd.to_numeric(stock_close, errors='coerce').sort_index()
     idx_close = pd.to_numeric(idx_close, errors='coerce').sort_index()
@@ -121,6 +122,7 @@ def v4_rs_line(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
 
         current_dt = s_dates[i]
         pos = np.searchsorted(i_dates, current_dt, side='right') - 1
+
         if pos < 62:
             out[i] = 0.0
             continue
@@ -147,11 +149,11 @@ def v4_rs_line(stock_close: pd.Series, idx_close: pd.Series) -> pd.Series:
 def v4_rsi(close: pd.Series, p: int = 14) -> pd.Series:
     close = pd.to_numeric(close, errors='coerce')
     diff = close.diff()
-
     gains = diff.clip(lower=0).rolling(p, min_periods=p).sum()
     losses = (-diff.clip(upper=0)).rolling(p, min_periods=p).sum()
 
     rsi = pd.Series(np.nan, index=close.index, dtype=float)
+
     zero_losses = (losses == 0)
     normal_mask = (~zero_losses) & losses.notna()
 
@@ -193,9 +195,10 @@ def v4_pivot_events(df: pd.DataFrame, w: int = 3):
 def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
     df = df.sort_index().copy()
     n = len(df)
-    piv = v4_pivot_events(df, w=w)
 
+    piv = v4_pivot_events(df, w=w)
     visible_on = [[] for _ in range(n)]
+
     for p in piv:
         vis_i = p['pivot_i'] + w
         if vis_i < n:
@@ -223,6 +226,7 @@ def v4_structure_labels(df: pd.DataFrame, w: int = 3, last_pivots: int = 15):
             + '+'
             + ('HL' if l[-1]['value'] > l[-2]['value'] else 'LL')
         )
+
         struct_label[i] = label
         struct_ok[i] = ('HH' in label and 'HL' in label)
 
@@ -252,7 +256,8 @@ def v4_true_range(df: pd.DataFrame) -> pd.Series:
     ], axis=1).max(axis=1)
 
     return tr
-    
+
+
 # ===========================
 # Fonctions utilitaires
 # ===========================
@@ -266,17 +271,20 @@ def _to_ts(x):
     except Exception:
         return ts
 
+
 def _safe_float(x, default=0.0):
     try:
         return float(x)
     except Exception:
         return default
 
+
 def _safe_int(x, default=0):
     try:
         return int(x)
     except Exception:
         return default
+
 
 def _sort_trade_candidates(candidates, cfg):
     mode = cfg.get('ENTRY_PRIORITY', 'score_then_volume')
@@ -296,6 +304,7 @@ def _sort_trade_candidates(candidates, cfg):
         ),
         reverse=True
     )
+
 
 def _compute_real_entry_quantity(entry_px, budget_eur, fees_pct):
     """
@@ -321,6 +330,7 @@ def _compute_real_entry_quantity(entry_px, budget_eur, fees_pct):
 
     return qty, gross_buy, buy_fees, cash_debited
 
+
 def _compute_real_exit_cash(qty, exit_px, fees_pct):
     """
     Cash récupéré à la vente après frais.
@@ -338,9 +348,87 @@ def _compute_real_exit_cash(qty, exit_px, fees_pct):
 
     return gross_sell, sell_fees, cash_credited
 
+
+# ===========================
+# Cloture - gestion de portefeuille
+# ===========================
+
+def _close_trade_v4(tr, date, exit_px, exit_type, stock_df_attrs, idx_close_entry=None, idx_close_exit=None):
+    """
+    Clôture un trade en conservant explicitement prix d'entrée / sortie
+    et toutes les infos utiles à l'allocator portefeuille.
+    """
+    entry_px = _safe_float(tr.get('e_px'), 0.0)
+    exit_px = _safe_float(exit_px, 0.0)
+    fees = _safe_float(tr.get('fees', 0.0), 0.0)
+    size = _safe_float(tr.get('size', 0.0), 0.0)
+
+    # PnL théorique historique sur SIZE nominal
+    gross_buy = size
+    cash_out = gross_buy * (1.0 + fees)
+
+    qty_theoretical = gross_buy / entry_px if entry_px > 0 else 0.0
+    gross_sell = qty_theoretical * exit_px if exit_px > 0 else 0.0
+    cash_in = gross_sell * (1.0 - fees)
+
+    gain = cash_in - cash_out
+
+    stock_ret_trade_pct = ((exit_px / entry_px) - 1.0) * 100.0 if entry_px > 0 and exit_px > 0 else None
+    idx_return_trade_pct = None
+    excess_return_vs_idx_pct = None
+
+    if idx_close_entry is not None and idx_close_exit is not None and idx_close_entry > 0:
+        idx_return_trade_pct = ((idx_close_exit / idx_close_entry) - 1.0) * 100.0
+        if stock_ret_trade_pct is not None:
+            excess_return_vs_idx_pct = stock_ret_trade_pct - idx_return_trade_pct
+
+    out = {
+        'Ticker': stock_df_attrs.get('Ticker', 'NA'),
+        'Achat': tr['date'].strftime('%Y-%m-%d'),
+        'Vente': date.strftime('%Y-%m-%d'),
+
+        'Prix_Entree': round(entry_px, 6),
+        'Prix_Vente': round(exit_px, 6),
+
+        'Type': exit_type,
+        'Gain': round(gain, 2),
+        'Orig_SIZE': round(size, 2),
+
+        'Stock_Return_Trade_Pct': round(stock_ret_trade_pct, 4) if stock_ret_trade_pct is not None else None,
+        'Idx_Return_Trade_Pct': round(idx_return_trade_pct, 4) if idx_return_trade_pct is not None else None,
+        'Excess_Return_vs_Idx_Pct': round(excess_return_vs_idx_pct, 4) if excess_return_vs_idx_pct is not None else None,
+
+        'BE_Assigned_Pct': round(_safe_float(tr.get('be_trig'), 0.0) * 100.0, 4),
+        'BE_Type': tr.get('be_type'),
+        'TP_Assigned_Pct': round(_safe_float(tr.get('tp_val'), 0.0) * 100.0, 4),
+
+        'Bars': tr.get('bars_held'),
+        'Bars_to_BE': tr.get('bars_to_be'),
+        'Bars_to_SL': tr.get('bars_to_sl'),
+        'Bars_to_TP': tr.get('bars_to_tp'),
+
+        'MAE_Pct': round(_safe_float(tr.get('mae_pct'), 0.0) * 100.0, 4),
+        'MFE_Pct': round(_safe_float(tr.get('mfe_pct'), 0.0) * 100.0, 4),
+        'Max_Close_Pct': round(_safe_float(tr.get('max_close_pct'), 0.0) * 100.0, 4),
+        'Min_Close_Pct': round(_safe_float(tr.get('min_close_pct'), 0.0) * 100.0, 4),
+
+        'Score_Entry': tr.get('Score_Entry'),
+        'Volume_Ratio_Entry': tr.get('Volume_Ratio_Entry'),
+        'TP_Regime_Source': tr.get('TP_Regime_Source'),
+        'Structure_Label_Entry': tr.get('Structure_Label_Entry'),
+
+        'Profit_Lock_Level': tr.get('profit_lock_level'),
+        'Profit_Lock_Raw_Pct': round(_safe_float(tr.get('profit_lock_raw'), 0.0) * 100.0, 4)
+        if tr.get('profit_lock_raw') is not None else None
+    }
+
+    return out
+
+
 # ===========================
 # Moteur par ticker
 # ===========================
+
 def _v4_run_ticker(stock_df: pd.DataFrame,
                    idx_close: pd.Series,
                    cfg: dict,
@@ -352,9 +440,12 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
     # --- Indicateurs ---
     rs_line = v4_rs_line(stock_df['Close'], idx_close)
     rsi = v4_rsi(stock_df['Close'], p=14)
+
     vratio = (stock_df['Volume'] / stock_df['Volume'].rolling(20, min_periods=20).mean()).fillna(0.0)
+
     mm20 = stock_df['Close'].rolling(20, min_periods=20).mean()
     dist_m20 = ((stock_df['Close'] - mm20).abs() / mm20).fillna(1.0)
+
     sqz_flag = v4_squeeze_flag(stock_df)
 
     struct_label, struct_ok = v4_structure_labels(
@@ -384,14 +475,18 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
     # --- Score ---
     s_val = pd.Series(0.0, index=stock_df.index)
+
     s_val += np.where(struct_ok, cfg['W_STRUCT'], 0)
     s_val += np.where(sqz_flag, cfg['W_SQZ'], 0)
+
     s_val += np.where(
         vratio > 1.5,
         cfg['W_VOL'],
         np.where(vratio > 1.1, cfg['W_VOL'] / 2, 0)
     )
+
     s_val += np.where((rsi >= 50) & (rsi <= 70), cfg['W_RSI'], 0)
+
     s_val += np.where(
         dist_m20 <= 0.01,
         np.where(stock_df['Close'] >= mm20, cfg['W_DIST_M20'], cfg.get('PENALTY_MM20', -10)),
@@ -476,104 +571,36 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
             if hit_tp or hit_sl:
                 raw_exit = effective_sl if hit_sl else active_trade['tp_val']
-                gain_cash = (raw_exit - cfg['FEES']) * cfg['SIZE']
 
                 if hit_tp and not hit_sl:
                     trade_type = 'TP'
+                    active_trade['bars_to_tp'] = active_trade['bars_held']
                 else:
                     if active_trade.get('profit_lock_raw') is not None and effective_sl > cfg['FEES']:
                         trade_type = active_trade.get('profit_lock_level', 'LOCK')
                     else:
                         trade_type = 'BE' if active_trade['be_hit'] else 'SL'
-
-                if trade_type == 'TP':
-                    active_trade['bars_to_tp'] = active_trade['bars_held']
-                else:
                     active_trade['bars_to_sl'] = active_trade['bars_held']
 
+                # --- prix de sortie réel ---
+                exit_px_real = active_trade['e_px'] * (1.0 + raw_exit)
+
                 # --- benchmark à la sortie ---
-                idx_exit_px = idx_close.reindex(stock_df.index).loc[date]
+                idx_exit_px = idx_close.reindex(stock_df.index).loc[date] if date in idx_close.reindex(stock_df.index).index else None
 
-                idx_return_trade_pct = None
-                excess_return_vs_idx_pct = None
-                stock_return_trade_pct = (raw_exit - cfg['FEES']) * 100.0
+                trade = _close_trade_v4(
+                    tr=active_trade,
+                    date=date,
+                    exit_px=exit_px_real,
+                    exit_type=trade_type,
+                    stock_df_attrs=stock_df.attrs,
+                    idx_close_entry=active_trade.get('idx_entry_px'),
+                    idx_close_exit=float(idx_exit_px) if pd.notna(idx_exit_px) else None
+                )
 
-                if (
-                    active_trade.get('idx_entry_px') is not None
-                    and pd.notna(idx_exit_px)
-                    and active_trade['idx_entry_px'] != 0
-                ):
-                    idx_return_trade_pct = ((float(idx_exit_px) / float(active_trade['idx_entry_px'])) - 1.0) * 100.0
-                    excess_return_vs_idx_pct = stock_return_trade_pct - idx_return_trade_pct
-
-                ledger.append({
-                    'Ticker': stock_df.attrs.get('Ticker', 'NA'),
-                    'Achat': active_trade['date'].strftime('%Y-%m-%d'),
-                    'Vente': date.strftime('%Y-%m-%d'),
-                    'Gain': float(gain_cash),
-                    'Type': trade_type,
-                    'Bars': active_trade['bars_held'],
-
-                    # --- Logging analytique existant ---
-                    'MFE_Pct': round(active_trade['mfe_pct'] * 100, 2),
-                    'MAE_Pct': round(active_trade['mae_pct'] * 100, 2),
-                    'Max_Close_Pct': round(active_trade['max_close_pct'] * 100, 2),
-                    'Min_Close_Pct': round(active_trade['min_close_pct'] * 100, 2),
-                    'Bars_to_BE': active_trade['bars_to_be'],
-                    'Bars_to_TP': active_trade['bars_to_tp'],
-                    'Bars_to_SL': active_trade['bars_to_sl'],
-                    'TP_Assigned_Pct': round(active_trade['tp_val'] * 100, 2),
-                    'BE_Assigned_Pct': round(active_trade['be_trig'] * 100, 2),
-                    'BE_Type': active_trade['be_type'],
-
-                    # --- Profit Lock existant ---
-                    'Profit_Lock_Level': active_trade.get('profit_lock_level', None),
-                    'Profit_Lock_Raw_Pct': round(active_trade['profit_lock_raw'] * 100, 2)
-                    if active_trade.get('profit_lock_raw') is not None else None,
-
-                    # ======================================================
-                    # NOUVEAUX CHAMPS D'ANALYSE A L'ENTREE
-                    # ======================================================
-                    'Score_Entry': round(active_trade['score_entry'], 2),
-                    'RS_Line_Entry': round(active_trade['rs_line_entry'], 2),
-                    'RS_SMA_Entry': round(active_trade['rs_sma_entry'], 2)
-                    if active_trade['rs_sma_entry'] is not None else None,
-                    'RS_Momentum_OK_Entry': active_trade['rs_momentum_ok_entry'],
-                    'RSI_Entry': round(active_trade['rsi_entry'], 2),
-                    'Volume_Ratio_Entry': round(active_trade['volume_ratio_entry'], 3),
-                    'Dist_M20_Entry_Pct': round(active_trade['dist_m20_entry_pct'], 2),
-                    'Squeeze_Flag_Entry': active_trade['squeeze_flag_entry'],
-                    'Structure_Label_Entry': active_trade['structure_label_entry'],
-                    'Structure_OK_Entry': active_trade['structure_ok_entry'],
-                    'Price_Filter_OK_Entry': active_trade['price_filter_ok_entry'],
-                    'Price_vs_SMA200_Entry_Pct': round(active_trade['price_vs_sma200_entry_pct'], 2)
-                    if active_trade['price_vs_sma200_entry_pct'] is not None else None,
-
-                    'Idx_Close_Entry': round(active_trade['idx_entry_px'], 2)
-                    if active_trade['idx_entry_px'] is not None else None,
-                    'Idx_SMA_Entry': round(active_trade['idx_entry_sma'], 2)
-                    if active_trade['idx_entry_sma'] is not None else None,
-                    'Idx_Gap_vs_SMA_Entry_Pct': round(active_trade['idx_gap_vs_sma_entry_pct'], 3)
-                    if active_trade['idx_gap_vs_sma_entry_pct'] is not None else None,
-                    'Idx_Slope_Entry_Pct': round(active_trade['idx_slope_entry_pct'], 3)
-                    if active_trade['idx_slope_entry_pct'] is not None else None,
-                    'Mkt_Filter_OK_Entry': active_trade['mkt_filter_ok_entry'],
-
-                    'Vol_Pct_Entry': round(active_trade['vol_pct_entry'], 3),
-                    'Is_FAST_BE_Entry': active_trade['is_fast_be_entry'],
-                    'Is_Strong_Trend_Entry': active_trade['is_strong_trend_entry'],
-                    'TP_Regime_Source': active_trade['tp_regime_source'],
-
-                    # ======================================================
-                    # PERFORMANCE RELATIVE AU BENCHMARK
-                    # ======================================================
-                    'Idx_Close_Exit': round(float(idx_exit_px), 2) if pd.notna(idx_exit_px) else None,
-                    'Stock_Return_Trade_Pct': round(stock_return_trade_pct, 2),
-                    'Idx_Return_Trade_Pct': round(idx_return_trade_pct, 2) if idx_return_trade_pct is not None else None,
-                    'Excess_Return_vs_Idx_Pct': round(excess_return_vs_idx_pct, 2) if excess_return_vs_idx_pct is not None else None
-                })
-
+                ledger.append(trade)
                 active_trade = None
+
             else:
                 if be_triggered_this_bar:
                     active_trade['be_hit'] = True
@@ -637,7 +664,7 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
             active_trade = {
                 'date': date,
-                'e_px': float(row['Close']),           
+                'e_px': float(row['Close']),
                 'size': float(cfg['SIZE']),
                 'fees': float(cfg['FEES']),
                 'tp_val': float(current_tp),
@@ -662,30 +689,27 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
                 # ======================================================
                 # NOUVEAUX CHAMPS D'ANALYSE A L'ENTREE
                 # ======================================================
-                'Score_Entry': float(score),
-                'rs_line_entry': float(rs_line.loc[date]),
-                'rs_sma_entry': float(rs_sma_entry) if pd.notna(rs_sma_entry) else None,
-                'rs_momentum_ok_entry': bool(rs_momentum_ok.loc[date]),
-                'rsi_entry': float(rsi.loc[date]),
-                'Volume_Ratio_Entry': float(row.get('Volume_Ratio', 0.0)) if 'Volume_Ratio' in row else None,
-                'dist_m20_entry_pct': float(dist_m20.loc[date] * 100.0),
-                'squeeze_flag_entry': bool(sqz_flag.loc[date]),
-                'structure_label_entry': struct_label.loc[date],
-                'structure_ok_entry': bool(struct_ok.loc[date]),
-                'price_filter_ok_entry': bool(price_filter_ok.loc[date]),
-                'price_vs_sma200_entry_pct': float(price_vs_sma200_pct) if price_vs_sma200_pct is not None else None,
-
+                'Score_Entry': float(score.loc[date]),
+                'RS_Line_Entry': float(rs_line.loc[date]),
+                'RS_SMA_Entry': float(rs_sma_entry) if pd.notna(rs_sma_entry) else None,
+                'RS_Momentum_OK_Entry': bool(rs_momentum_ok.loc[date]),
+                'RSI_Entry': float(rsi.loc[date]),
+                'Volume_Ratio_Entry': float(vratio.loc[date]) if pd.notna(vratio.loc[date]) else None,
+                'Dist_M20_Entry_Pct': float(dist_m20.loc[date] * 100.0),
+                'Squeeze_Flag_Entry': bool(sqz_flag.loc[date]),
+                'Structure_Label_Entry': struct_label.loc[date],
+                'Structure_OK_Entry': bool(struct_ok.loc[date]),
+                'Price_Filter_OK_Entry': bool(price_filter_ok.loc[date]),
+                'Price_vs_SMA200_Entry_Pct': float(price_vs_sma200_pct) if price_vs_sma200_pct is not None else None,
                 'idx_entry_px': float(idx_entry_px) if pd.notna(idx_entry_px) else None,
                 'idx_entry_sma': float(idx_entry_sma) if pd.notna(idx_entry_sma) else None,
                 'idx_gap_vs_sma_entry_pct': float(idx_gap_vs_sma_pct) if idx_gap_vs_sma_pct is not None else None,
                 'idx_slope_entry_pct': float(slope * 100.0) if pd.notna(slope) else None,
                 'mkt_filter_ok_entry': bool(mkt_ok.loc[date]),
-
                 'vol_pct_entry': float(vol_pct * 100.0),
                 'is_fast_be_entry': bool(is_fast_be),
                 'is_strong_trend_entry': bool(is_strong),
-                'Structure_Label_Entry': structure_label,
-                'tp_regime_source': tp_regime_source
+                'TP_Regime_Source': tp_regime_source
             }
 
     # --- Trade en cours ---
@@ -720,7 +744,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
         }
 
     df_ledger = pd.DataFrame(ledger)
-
     stats = {
         'nb_trades': int(len(df_ledger)),
         'gain_total': float(df_ledger['Gain'].sum()) if len(df_ledger) else 0.0,
@@ -730,80 +753,6 @@ def _v4_run_ticker(stock_df: pd.DataFrame,
 
     return stats, ledger, open_trade
 
-# ===========================
-# Cloture - gestion de portefeuille
-# ===========================
-
-def _close_trade_v4(tr, date, exit_px, exit_type, stock_df_attrs, idx_close_entry=None, idx_close_exit=None):
-    """
-    Clôture un trade en conservant explicitement prix d'entrée / sortie
-    et toutes les infos utiles à l'allocator portefeuille.
-    """
-    entry_px = _safe_float(tr.get('e_px'), 0.0)
-    exit_px = _safe_float(exit_px, 0.0)
-    fees = _safe_float(tr.get('fees', 0.0), 0.0)
-    size = _safe_float(tr.get('size', 0.0), 0.0)
-
-    # PnL théorique historique sur SIZE nominal
-    gross_buy = size
-    cash_out = gross_buy * (1.0 + fees)
-
-    qty_theoretical = gross_buy / entry_px if entry_px > 0 else 0.0
-    gross_sell = qty_theoretical * exit_px if exit_px > 0 else 0.0
-    cash_in = gross_sell * (1.0 - fees)
-
-    gain = cash_in - cash_out
-
-    stock_ret_trade_pct = ((exit_px / entry_px) - 1.0) * 100.0 if entry_px > 0 and exit_px > 0 else None
-    idx_return_trade_pct = None
-    excess_return_vs_idx_pct = None
-
-    if idx_close_entry is not None and idx_close_exit is not None and idx_close_entry > 0:
-        idx_return_trade_pct = ((idx_close_exit / idx_close_entry) - 1.0) * 100.0
-        if stock_ret_trade_pct is not None:
-            excess_return_vs_idx_pct = stock_ret_trade_pct - idx_return_trade_pct
-
-    out = {
-        'Ticker': stock_df_attrs.get('Ticker', 'NA'),
-        'Achat': tr['date'].strftime('%Y-%m-%d'),
-        'Vente': date.strftime('%Y-%m-%d'),
-
-        'Prix_Entree': round(entry_px, 6),
-        'Prix_Vente': round(exit_px, 6),
-
-        'Type': exit_type,
-        'Gain': round(gain, 2),
-        'Orig_SIZE': round(size, 2),
-
-        'Stock_Return_Trade_Pct': round(stock_ret_trade_pct, 4) if stock_ret_trade_pct is not None else None,
-        'Idx_Return_Trade_Pct': round(idx_return_trade_pct, 4) if idx_return_trade_pct is not None else None,
-        'Excess_Return_vs_Idx_Pct': round(excess_return_vs_idx_pct, 4) if excess_return_vs_idx_pct is not None else None,
-
-        'BE_Assigned_Pct': round(_safe_float(tr.get('be_trig'), 0.0) * 100.0, 4),
-        'BE_Type': tr.get('be_type'),
-        'TP_Assigned_Pct': round(_safe_float(tr.get('tp_val'), 0.0) * 100.0, 4),
-
-        'Bars': tr.get('bars_held'),
-        'Bars_to_BE': tr.get('bars_to_be'),
-        'Bars_to_SL': tr.get('bars_to_sl'),
-        'Bars_to_TP': tr.get('bars_to_tp'),
-
-        'MAE_Pct': round(_safe_float(tr.get('mae_pct'), 0.0) * 100.0, 4),
-        'MFE_Pct': round(_safe_float(tr.get('mfe_pct'), 0.0) * 100.0, 4),
-        'Max_Close_Pct': round(_safe_float(tr.get('max_close_pct'), 0.0) * 100.0, 4),
-        'Min_Close_Pct': round(_safe_float(tr.get('min_close_pct'), 0.0) * 100.0, 4),
-
-        'Score_Entry': tr.get('Score_Entry'),
-        'Volume_Ratio_Entry': tr.get('Volume_Ratio_Entry'),
-        'TP_Regime_Source': tr.get('TP_Regime_Source'),
-        'Structure_Label_Entry': tr.get('Structure_Label_Entry'),
-
-        'Profit_Lock_Level': tr.get('profit_lock_level'),
-        'Profit_Lock_Raw_Pct': round(_safe_float(tr.get('profit_lock_raw'), 0.0) * 100.0, 4)
-        if tr.get('profit_lock_raw') is not None else None
-    }
-
-    return out
 
 # ===========================
 # Gestion du cash
@@ -841,6 +790,7 @@ def _apply_cash_allocator(candidate_trades, candidate_open_positions, cfg):
         tt = dict(t)
         tt['Achat_ts'] = _to_ts(tt.get('Achat'))
         tt['Vente_ts'] = _to_ts(tt.get('Vente'))
+
         if pd.isna(tt['Achat_ts']) or pd.isna(tt['Vente_ts']):
             continue
 
@@ -950,6 +900,7 @@ def _apply_cash_allocator(candidate_trades, candidate_open_positions, cfg):
         # =================================================
         for cand, target_budget in zip(day_candidates, target_budgets):
             entry_px = _safe_float(cand.get('Entry_Price_Real'), 0.0)
+
             if entry_px <= 0:
                 rejected_entries_count += 1
                 continue
@@ -1039,6 +990,7 @@ def _apply_cash_allocator(candidate_trades, candidate_open_positions, cfg):
 # ===========================
 # Moteur multi-tickers
 # ===========================
+
 def alpha4(cfg):
     client = bigquery.Client(project=cfg['PROJECT'])
 
